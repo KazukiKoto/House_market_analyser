@@ -1,0 +1,19 @@
+# Python cache and compiled files
+__pycache__/
+*.pyc
+
+# Database and cache files
+*.db
+dashboard_plot_cache.pkl
+dashboard_plot_cache_hash.txt
+
+# Environment and secrets
+.env
+
+# IDE and workspace files
+.vscode/
+.idea/
+
+# OS-specific files
+Thumbs.db
+.DS_Store
