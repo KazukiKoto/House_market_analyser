@@ -18,7 +18,7 @@ A Python project for analyzing and visualizing house market data. It includes da
 ## Setup
 1. Clone the repository:
    ```pwsh
-   git clone <your-repo-url>
+   git clone https://github.com/KazukiKoto/House_market_analyser
    ```
 2. Install dependencies:
    ```pwsh
