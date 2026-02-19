@@ -129,6 +129,23 @@
             margin-right: 10px;
             object-fit: cover;
             background: #eaeaea;
+            transition: opacity 0.2s;
+        }
+        .house-card a {
+            text-decoration: none;
+            color: inherit;
+        }
+        .house-card a:hover img {
+            opacity: 0.8;
+        }
+        .house-card h2 {
+            color: #0078d4;
+            margin: 0 0 8px 0;
+            transition: color 0.2s;
+        }
+        .house-card a:hover h2 {
+            color: #005fa3;
+            text-decoration: underline;
         }
         .pagination {
             margin-top: 20px;
@@ -190,9 +207,13 @@
             <!-- Houses will be dynamically inserted here -->
             {% for house in houses %}
             <div class="house-card">
-                <img src="{% if house.images and house.images|length > 0 %}{{ house.images[0] }}{% else %}/static/no-image.png{% endif %}" alt="Image of {{ house.name }}">
+                <a href="{{ house.url }}" target="_blank" rel="noopener noreferrer">
+                    <img src="{% if house.images and house.images|length > 0 %}{{ house.images[0] }}{% else %}/static/no-image.png{% endif %}" alt="Image of {{ house.name }}">
+                </a>
                 <div>
-                    <h2>{{ house.name }}</h2>
+                    <a href="{{ house.url }}" target="_blank" rel="noopener noreferrer">
+                        <h2>{{ house.name }}</h2>
+                    </a>
                     <p>Price: £{{ house.price }}</p>
                     <p>Bedrooms: {{ house.beds }}</p>
                     <p>Square Footage: {{ house.sqft }}</p>
