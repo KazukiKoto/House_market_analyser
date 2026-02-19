@@ -1,36 +1,47 @@
-FROM python:3.12-slim
-# Set working directory
+# Stage 1: Frontend builder
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /app/frontend
+
+# Copy package files and install dependencies
+COPY frontend/package*.json ./
+RUN npm ci
+
+# Copy frontend source and build
+COPY frontend/ ./
+RUN npm run build
+
+# Stage 2: Python dependencies builder
+FROM python:3.12-slim AS python-builder
+
 WORKDIR /app
 
-# System dependencies including Node.js for frontend build
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
-    curl \
-    gnupg \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
-       > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Python dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
 
-# Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Stage 3: Final runtime
+FROM python:3.12-slim
 
-# Copy frontend files and build
-COPY frontend/package*.json frontend/
-WORKDIR /app/frontend
-RUN npm ci
 WORKDIR /app
-COPY frontend/ frontend/
-WORKDIR /app/frontend
-RUN npm run build
-WORKDIR /app
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python dependencies from builder
+COPY --from=python-builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Copy built frontend from frontend-builder
+COPY --from=frontend-builder /app/static /app/static
 
 # Copy application files
 COPY dashboard.py .
