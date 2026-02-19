@@ -11,7 +11,7 @@ A Python project for analyzing and visualizing house market data. It includes da
 - HTML templates for web-based UI
 - AI-powered property search assistant
 
-> **Scraping Robustness**: The scraper uses a 3-tier fallback system (JSON-LD → URL patterns → Legacy selectors) that automatically adapts to website changes. See [ROBUST_SCRAPER_DESIGN.md](ROBUST_SCRAPER_DESIGN.md) for technical details.
+> **Scraping Robustness**: The scraper uses a 3-tier fallback system (JSON-LD → URL patterns → Legacy selectors) that automatically adapts to website changes. See the scraper design notes and in-code documentation for more technical details.
 
 ## Project Structure
 - `scraper.py`: Scrapes house market data
@@ -157,7 +157,6 @@ docker-compose exec dashboard /bin/bash
 **Troubleshooting:**
 - If port 8338 is in use, change the port mapping in `docker-compose.yml` to a different port like `"8080:8000"`
 - Ensure Ollama is running on your host machine
-- On Linux, you may need `--network=host` instead of `host.docker.internal`
 - On Linux, you may need `--network=host` instead of `host.docker.internal`
 
 ### Option 2: Local Python Installation
