@@ -4,9 +4,11 @@ A Python project for analyzing and visualizing house market data. It includes da
 
 ## Features
 - Scrapes property data and stores it in a local database
+- **Automated scraping**: Runs automatically every hour and on application startup
 - Cleans and removes invalid data
 - Interactive dashboard for data visualization
 - HTML templates for web-based UI
+- AI-powered property search assistant
 
 ## Project Structure
 - `scraper.py`: Scrapes house market data
@@ -196,7 +198,29 @@ If you want to build your own housing dataset by scraping other websites:
 3. **Testing:**
    - Test your changes on a small sample before running on large datasets.
 
-## Setting Up Scraper or Dashboard as a Startup Task
+## Automated Property Scraping
+
+The application now includes **automated scraping** that runs:
+- **On startup**: Initial scrape when the container starts
+- **Every hour**: Scheduled scrape runs automatically
+
+You can configure the scraping behavior using environment variables. See [SCRAPING_AUTOMATION.md](SCRAPING_AUTOMATION.md) for detailed configuration options.
+
+### Quick Configuration Example
+
+Add these to your `docker-compose.yml` environment section:
+```yaml
+environment:
+  - SCRAPER_LOCATION=worcester
+  - SCRAPER_MIN_PRICE=200000
+  - SCRAPER_MAX_PRICE=500000
+  - SCRAPER_MIN_BEDS=3
+```
+
+## Setting Up Scraper or Dashboard as a Startup Task (Legacy)
+
+> **Note:** With Docker deployment, automated scraping is now built-in (see section above). These instructions are for manual Python installations.
+
 If you want to automate running the scraper or dashboard:
 
 - **VS Code Task:**

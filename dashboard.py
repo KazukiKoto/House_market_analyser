@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from statistics import median, mean
 from datetime import datetime
 from fastapi.templating import Jinja2Templates
+from contextlib import asynccontextmanager
 import os
 import sqlite3
 import matplotlib.pyplot as plt
@@ -21,6 +22,14 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
 from langchain_ollama import ChatOllama
 from langchain_core.tools import Tool
+from apscheduler.schedulers.background import BackgroundScheduler
+import logging
+
+# Import scraper functions
+try:
+    from scraper import run_scrape
+except ImportError:
+    run_scrape = None
 
 ##################################################
 # config and app setup
@@ -29,7 +38,108 @@ from langchain_core.tools import Tool
 # DB_DEFAULT - use environment variable or default to relative path
 DB_DEFAULT = os.environ.get("DB_DEFAULT", os.path.join(os.path.dirname(__file__), "properties.db"))
 
-app = FastAPI(title="House Market Dashboard")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Scheduler instance
+scheduler = None
+
+##################################################
+# scraping automation
+##################################################
+
+def run_scheduled_scrape():
+    """
+    Run the scraper to update property data.
+    This function is called on startup and every hour.
+    """
+    if run_scrape is None:
+        logger.warning("Scraper not available - skipping scheduled scrape")
+        return
+    
+    logger.info("Starting scheduled property scrape...")
+    try:
+        # Get database path (use environment variable or default)
+        db_path = DB_DEFAULT
+        
+        # Get scraping parameters from environment or use defaults
+        site = os.environ.get("SCRAPER_SITE", "onthemarket")
+        location = os.environ.get("SCRAPER_LOCATION", "worcester")
+        pages = os.environ.get("SCRAPER_PAGES")  # None = auto-detect all pages
+        if pages is not None:
+            pages = int(pages)
+        
+        min_price = os.environ.get("SCRAPER_MIN_PRICE")
+        if min_price is not None:
+            min_price = int(min_price)
+        
+        max_price = os.environ.get("SCRAPER_MAX_PRICE")
+        if max_price is not None:
+            max_price = int(max_price)
+        
+        min_beds = os.environ.get("SCRAPER_MIN_BEDS")
+        if min_beds is not None:
+            min_beds = int(min_beds)
+        
+        delay = float(os.environ.get("SCRAPER_DELAY", "1.0"))
+        max_workers = int(os.environ.get("SCRAPER_MAX_WORKERS", "7"))
+        
+        # Run the scraper
+        results = run_scrape(
+            db_path=db_path,
+            site=site,
+            location=location,
+            pages=pages,
+            min_price=min_price,
+            max_price=max_price,
+            min_beds=min_beds,
+            delay=delay,
+            max_workers=max_workers
+        )
+        
+        logger.info(f"Scraping completed successfully. Found {len(results)} properties.")
+    except Exception as e:
+        logger.error(f"Error during scheduled scrape: {e}", exc_info=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager to handle startup and shutdown events.
+    Starts the scheduler and runs initial scrape on startup.
+    """
+    global scheduler
+    
+    # Startup
+    logger.info("Application starting up...")
+    
+    # Run initial scrape on startup
+    logger.info("Running initial property scrape...")
+    threading.Thread(target=run_scheduled_scrape, daemon=True).start()
+    
+    # Start scheduler for hourly scraping
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(
+        run_scheduled_scrape,
+        'interval',
+        hours=1,
+        id='scrape_properties',
+        replace_existing=True
+    )
+    scheduler.start()
+    logger.info("Scheduler started - will scrape properties every hour")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Application shutting down...")
+    if scheduler:
+        scheduler.shutdown()
+        logger.info("Scheduler stopped")
+
+
+app = FastAPI(title="House Market Dashboard", lifespan=lifespan)
 
 # middleware for local browser access
 app.add_middleware(
