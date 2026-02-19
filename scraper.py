@@ -1,12 +1,14 @@
 import re
+import os
 import time
 import argparse
+import tempfile
 from urllib.parse import urljoin, urlencode
 import requests
 from bs4 import BeautifulSoup
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -51,7 +53,7 @@ def candidate_listing_anchors(soup):
             anchors.append(a)
     return anchors
 
-def _extract_json_ld_properties(soup):
+def _extract_json_ld_properties(soup, base_url=''):
     """
     Strategy 1: Extract properties from JSON-LD structured data.
     Most reliable but may not always be present.
@@ -67,23 +69,36 @@ def _extract_json_ld_properties(soup):
                 item_type = item.get('@type', '')
                 if item_type not in ['Product', 'RealEstateListing', 'Offer']:
                     continue
-                
+
                 # Validate it's actually a property listing
                 # Check for URL and that it contains /details/ (property detail page)
-                url = item.get('url', '')
-                if not url or '/details/' not in url:
+                raw_url = item.get('url', '')
+                if not raw_url or '/details/' not in raw_url:
                     continue
-                
+                url = urljoin(base_url, raw_url)
+
+                # Parse price: JSON-LD offers.price may be a number or a formatted string
+                offers = item.get('offers', {})
+                if isinstance(offers, list):
+                    offers = offers[0] if offers else {}
+                price_raw = offers.get('price') if isinstance(offers, dict) else None
+                if isinstance(price_raw, (int, float)):
+                    price = round(price_raw)
+                elif isinstance(price_raw, str):
+                    price = normalize_price(price_raw)
+                else:
+                    price = None
+
                 prop = {
                     'url': url,
                     'title': item.get('name', ''),
-                    'price': normalize_price(str(item.get('offers', {}).get('price', ''))),
+                    'price': price,
                     'address': item.get('address', {}).get('streetAddress', '') if isinstance(item.get('address'), dict) else '',
                     'beds': None,
                     'images': [],
                     'id': None
                 }
-                
+
                 # Only add if we have minimum viable data
                 if prop['url']:
                     properties.append(prop)
@@ -151,14 +166,28 @@ def _extract_from_detail_links(soup, base_url):
         # Extract beds from card text
         beds = normalize_beds(card_text)
         
-        # Extract address - look for text near the link or property type indicators
+        # Extract address - prefer semantic/CSS-based extraction, then fall back to heuristics
         address = ''
-        addr_indicators = ['WR1', 'WR2', 'WR3', 'WR4', 'WR5', 'road', 'street', 'avenue', 'worcester']
-        for text_node in card.find_all(string=True):
-            text = text_node.strip()
-            if any(indicator.lower() in text.lower() for indicator in addr_indicators):
-                address = text
-                break
+        address_el = (card.select_one('[itemprop="streetAddress"]') or
+                      card.select_one('[itemprop="address"]') or
+                      card.select_one('.address') or
+                      card.select_one('[class*="address"]'))
+        if address_el:
+            address = address_el.get_text(' ', strip=True)
+        else:
+            addr_indicators = [
+                'road', 'street', 'avenue', 'drive', 'lane', 'close',
+                'court', 'place', 'way', 'square', 'terrace', 'crescent',
+                'park', 'gardens', 'rise'
+            ]
+            for text_node in card.find_all(string=True):
+                text = text_node.strip()
+                if not text:
+                    continue
+                lower_text = text.lower()
+                if any(indicator in lower_text for indicator in addr_indicators):
+                    address = text
+                    break
         
         # Extract images
         images = set()
@@ -172,7 +201,7 @@ def _extract_from_detail_links(soup, base_url):
         properties.append({
             'id': pid or url,
             'url': url,
-            'title': title or address or f'Property {pid}',
+            'title': title or address or (f'Property {pid}' if pid is not None else url),
             'price': price,
             'beds': beds,
             'address': address,
@@ -260,30 +289,33 @@ def parse_search_results(soup, base_url):
     
     Returns list of dicts: id, url, title, price, beds, address, images
     """
-    
+
     # Try Strategy 1: JSON-LD
     print('[Strategy 1] Trying JSON-LD extraction...', flush=True)
-    results = _extract_json_ld_properties(soup)
-    if results:
-        print(f'[Strategy 1] ✓ Found {len(results)} properties via JSON-LD', flush=True)
+    results = _extract_json_ld_properties(soup, base_url)
+    if results and any(r.get('price') is not None for r in results):
+        print(f'[Strategy 1] [OK] Found {len(results)} properties via JSON-LD', flush=True)
         return results
-    print('[Strategy 1] ✗ No JSON-LD data found', flush=True)
-    
+    elif results:
+        print('[Strategy 1] JSON-LD found but data incomplete, trying Strategy 2 to enrich...', flush=True)
+    else:
+        print('[Strategy 1] [FAIL] No JSON-LD data found', flush=True)
+
     # Try Strategy 2: Detail links with context
     print('[Strategy 2] Trying URL pattern matching...', flush=True)
     results = _extract_from_detail_links(soup, base_url)
     if results:
-        print(f'[Strategy 2] ✓ Found {len(results)} properties via URL patterns', flush=True)
+        print(f'[Strategy 2] [OK] Found {len(results)} properties via URL patterns', flush=True)
         return results
-    print('[Strategy 2] ✗ No detail links found', flush=True)
-    
+    print('[Strategy 2] [FAIL] No detail links found', flush=True)
+
     # Try Strategy 3: Legacy selectors
     print('[Strategy 3] Trying legacy CSS selectors...', flush=True)
     results = _extract_legacy_format(soup, base_url)
     if results:
-        print(f'[Strategy 3] ✓ Found {len(results)} properties via legacy selectors', flush=True)
+        print(f'[Strategy 3] [OK] Found {len(results)} properties via legacy selectors', flush=True)
         return results
-    print('[Strategy 3] ✗ Legacy selectors failed', flush=True)
+    print('[Strategy 3] [FAIL] Legacy selectors failed', flush=True)
     
     # If all strategies fail, log debugging info
     print('[ERROR] All extraction strategies failed!', flush=True)
@@ -583,7 +615,7 @@ def save_property(conn, prop):
         return None
 
     cur = conn.cursor()
-    now = datetime.now().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     stored_id = str(prop.get('id') or prop.get('url'))
     # try to find existing DB id
     existing_id = _find_existing(conn, prop)
@@ -660,7 +692,7 @@ def mark_off_market(conn, seen_ids):
     Set off_market_at to now and on_market=0.
     """
     cur = conn.cursor()
-    now = datetime.now().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     # Build placeholders for NOT IN if any seen_ids, else mark all on_market rows off-market
     if seen_ids:
         placeholders = ','.join('?' for _ in seen_ids)
@@ -706,13 +738,15 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
     if not found:
         print('[WARNING] No properties found on first page - aborting', flush=True)
         print('[DEBUG] Page title:', soup.title.string if soup.title else 'N/A', flush=True)
-        # Save a debug copy of the HTML
-        try:
-            with open('debug_page.html', 'w', encoding='utf-8') as f:
-                f.write(html)
-            print('[DEBUG] Saved page HTML to debug_page.html for inspection', flush=True)
-        except:
-            pass
+        # Save a debug copy of the HTML only when explicitly requested
+        if os.environ.get('SCRAPER_DEBUG'):
+            try:
+                debug_path = os.path.join(tempfile.gettempdir(), 'debug_page.html')
+                with open(debug_path, 'w', encoding='utf-8') as f:
+                    f.write(html)
+                print(f'[DEBUG] Saved page HTML to {debug_path} for inspection', flush=True)
+            except OSError as e:
+                print(f'[DEBUG] Could not save debug HTML: {e}', flush=True)
         return []
 
     # Determine total results and total pages (30 per page)
