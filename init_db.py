@@ -1,0 +1,58 @@
+import sqlite3
+import os
+import sys
+
+# Create the database file in data directory if in container, otherwise current dir
+if os.path.exists('/app/data'):
+    db_path = "/app/data/properties.db"
+else:
+    db_path = "properties.db"
+
+try:
+    if os.path.exists(db_path):
+        print(f"[INFO] Database already exists at {db_path}")
+        sys.exit(0)
+    
+    print(f"[INFO] Creating database at {db_path}...")
+    
+    # Ensure directory exists
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+    
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    
+    # Create the properties table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS properties (
+        id TEXT PRIMARY KEY,
+        url TEXT UNIQUE,
+        name TEXT,
+        title TEXT,
+        price INTEGER,
+        property_type TEXT,
+        beds INTEGER,
+        sqft INTEGER,
+        address TEXT,
+        images TEXT,
+        summary TEXT,
+        first_seen TEXT,
+        last_seen TEXT,
+        off_market_at TEXT,
+        on_market INTEGER DEFAULT 1,
+        updated_at TEXT
+    )
+    """)
+    
+    # Create index
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_title_address ON properties(LOWER(title), LOWER(address))")
+    
+    conn.commit()
+    conn.close()
+    print(f"[SUCCESS] Database created successfully at {db_path}")
+    sys.exit(0)
+    
+except Exception as e:
+    print(f"[ERROR] Failed to create database: {e}", file=sys.stderr)
+    sys.exit(1)

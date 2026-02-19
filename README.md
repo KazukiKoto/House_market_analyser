@@ -16,6 +16,137 @@ A Python project for analyzing and visualizing house market data. It includes da
 - `properties.db`: SQLite database storing property data
 
 ## Setup
+
+### Option 1: Docker (Recommended)
+
+The easiest way to run this project is using Docker:
+
+#### Quick Start with Docker Compose
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/KazukiKoto/House_market_analyser
+   cd House_market_analyser
+   ```
+
+2. Run tests and initialize (optional but recommended):
+   ```bash
+   # Using Makefile (recommended)
+   make test       # Verify everything is set up correctly
+   make init-db    # Initialize database if it doesn't exist
+   
+   # Or using Python directly
+   python init_db.py
+   ```
+
+3. Build and start the container:
+   ```bash
+   # Using docker-compose directly
+   docker-compose up -d
+   
+   # Or using Makefile (includes pre-flight checks)
+   make start
+   ```
+
+4. Access the dashboard at `http://localhost:8338`
+
+5. Stop the container:
+   ```bash
+   # Using docker-compose
+   docker-compose down
+   
+   # Or using Makefile
+   make stop
+   ```
+
+#### Using Makefile Commands (Recommended)
+
+The project includes a Makefile for easy container management:
+
+**Setup & Testing:**
+```bash
+make test       # Run comprehensive system tests
+make init-db    # Initialize the database
+make pre-flight # Check all prerequisites
+make health     # Check if dashboard is healthy
+```
+
+**Container Management:**
+```bash
+make start      # Start containers (with pre-flight checks)
+make stop       # Stop containers
+make restart    # Restart containers
+make rebuild    # Rebuild and restart
+make status     # Show detailed status
+make logs       # View logs
+```
+
+**Utility:**
+```bash
+make shell      # Access container shell
+make scraper    # Run the scraper
+make clean      # Clean up everything
+```
+
+#### Using Docker CLI
+
+1. Build the image:
+   ```bash
+   docker build -t house-market-analyser .
+   ```
+
+2. Run the container:
+   ```bash
+   docker run -d -p 8338:8000 -v $(pwd)/data:/app/data --name house-market house-market-analyser
+   ```
+
+   On Windows PowerShell:
+   ```powershell
+   docker run -d -p 8338:8000 -v ${PWD}/data:/app/data --name house-market house-market-analyser
+   ```
+
+#### Docker Configuration
+
+**Data Persistence:** The `./data` directory is mounted as a volume, so databases persist on your host machine.
+
+**Ollama Integration:** This application uses Ollama for AI features. You have two options:
+
+- **Option A (Recommended):** Use Ollama on host machine
+  - Container accesses it via `host.docker.internal:11434`
+  - No additional configuration needed
+
+- **Option B:** Run Ollama in Docker
+  - Uncomment the `ollama` service section in `docker-compose.yml`
+  - Update `OLLAMA_HOST=http://ollama:11434` in the environment variables
+
+**Running the Scraper in Docker:**
+```bash
+docker-compose exec dashboard python scraper.py --help
+# Or using Makefile
+make scraper ARGS="--help"
+```
+
+**Development Commands:**
+```bash
+# Using Makefile (recommended)
+make rebuild       # Rebuild and restart
+make logs          # View logs
+make shell         # Access shell
+make scraper       # Run scraper
+
+# Or using docker-compose directly
+docker-compose up -d --build
+docker-compose logs -f dashboard
+docker-compose exec dashboard /bin/bash
+```
+
+**Troubleshooting:**
+- If port 8338 is in use, change the port mapping in `docker-compose.yml` to a different port like `"8080:8000"`
+- Ensure Ollama is running on your host machine or configured in Docker
+- On Linux, you may need `--network=host` instead of `host.docker.internal`
+
+### Option 2: Local Python Installation
+
 1. Clone the repository:
    ```pwsh
    git clone https://github.com/KazukiKoto/House_market_analyser

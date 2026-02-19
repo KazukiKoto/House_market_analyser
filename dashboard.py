@@ -26,8 +26,8 @@ from langchain_core.tools import Tool
 # config and app setup
 ##################################################
 
-# DB_DEFAULT to a relative path
-DB_DEFAULT = os.path.join(os.path.dirname(__file__), "properties.db")
+# DB_DEFAULT - use environment variable or default to relative path
+DB_DEFAULT = os.environ.get("DB_DEFAULT", os.path.join(os.path.dirname(__file__), "properties.db"))
 
 app = FastAPI(title="House Market Dashboard")
 

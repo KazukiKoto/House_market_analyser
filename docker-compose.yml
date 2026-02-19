@@ -1,0 +1,31 @@
+services:
+  dashboard:
+    build: .
+    container_name: house-market-dashboard
+    ports:
+      - "8338:8000"
+    volumes:
+      # Persist database in data directory
+      - ./data:/app/data
+    environment:
+      # Use database from data directory
+      - DB_DEFAULT=/app/data/properties.db
+      # If using Ollama, specify the host
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+    restart: unless-stopped
+    # Add extra_hosts to allow container to reach host machine for Ollama
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Uncomment if you want to run Ollama in a container
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #   restart: unless-stopped
+
+# volumes:
+#   ollama-data:
