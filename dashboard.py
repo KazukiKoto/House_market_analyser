@@ -1527,6 +1527,8 @@ def catch_all(full_path: str):
     """
     Catch-all route to serve React app for client-side routing.
     """
+    if full_path.startswith("api/") or full_path.startswith("plots/"):
+        raise HTTPException(status_code=404, detail="Not found")
     static_index = os.path.join(os.path.dirname(__file__), "static", "index.html")
     if os.path.exists(static_index):
         return FileResponse(static_index)

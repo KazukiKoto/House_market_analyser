@@ -8,7 +8,13 @@ import Assistant from './pages/Assistant'
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode')
-    return saved ? JSON.parse(saved) : false
+    if (!saved) return false
+    try {
+      const parsed = JSON.parse(saved)
+      return typeof parsed === 'boolean' ? parsed : false
+    } catch {
+      return false
+    }
   })
 
   useEffect(() => {

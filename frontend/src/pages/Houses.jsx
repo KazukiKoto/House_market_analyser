@@ -1,4 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+
+const PLACEHOLDER_IMAGE = 'data:image/svg+xml,%3Csvg xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22 width%3D%22128%22 height%3D%2296%22 viewBox%3D%220 0 128 96%22%3E%3Crect width%3D%22128%22 height%3D%2296%22 fill%3D%22%23d1d5db%22%2F%3E%3Ctext x%3D%2264%22 y%3D%2252%22 text-anchor%3D%22middle%22 fill%3D%22%236b7280%22 font-size%3D%2212%22%3ENo Image%3C%2Ftext%3E%3C%2Fsvg%3E'
 
 function Houses() {
   const [properties, setProperties] = useState([])
@@ -16,11 +18,7 @@ function Houses() {
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 20
 
-  useEffect(() => {
-    fetchProperties()
-  }, [])
-
-  const fetchProperties = async () => {
+  const fetchProperties = useCallback(async () => {
     try {
       setLoading(true)
       const params = new URLSearchParams({
@@ -36,7 +34,11 @@ function Houses() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [filters.on_market])
+
+  useEffect(() => {
+    fetchProperties()
+  }, [fetchProperties])
 
   const applyFilters = () => {
     setCurrentPage(1)
@@ -194,10 +196,10 @@ function Houses() {
                   className="flex gap-4 p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
                 >
                   <img
-                    src={(house.images && house.images.length > 0) ? house.images[0] : '/static/no-image.png'}
+                    src={(house.images && house.images.length > 0) ? house.images[0] : PLACEHOLDER_IMAGE}
                     alt={house.title || house.address}
                     className="w-32 h-24 object-cover rounded bg-gray-200 dark:bg-gray-600"
-                    onError={(e) => { e.target.src = '/static/no-image.png' }}
+                    onError={(e) => { e.target.onerror = null; e.target.src = PLACEHOLDER_IMAGE }}
                   />
                   <div className="flex-1">
                     <h3 className="text-lg font-semibold text-blue-600 dark:text-blue-400 hover:underline">
