@@ -7,6 +7,9 @@ __pycache__/
 dashboard_plot_cache.pkl
 dashboard_plot_cache_hash.txt
 
+# Frontend build output
+static/
+
 # Environment and secrets
 .env
 

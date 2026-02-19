@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Query, HTTPException, Request, Body
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from typing import List, Optional, Dict, Any
 from io import BytesIO
 from collections import Counter, defaultdict
@@ -151,6 +152,11 @@ app.add_middleware(
 
 # configure templates directory for web pages
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
+
+# Mount static files for React app
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
 
 ##################################################
 # db helpers
@@ -841,14 +847,20 @@ def get_cached_plot(key, db_path, plot_func, *args, **kwargs):
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: str = DB_DEFAULT, include_off_market: bool = True):
     """
-    Render the dashboard page with summary statistics, plots, and recent listings.
+    Serve the React app if available, otherwise render the old dashboard page.
     Args:
         request (Request): FastAPI request object.
         db (str): Path to the SQLite database file.
         include_off_market (bool): If True, include off-market properties.
     Returns:
-        HTMLResponse: Rendered dashboard page.
+        HTMLResponse or FileResponse: React app or rendered dashboard page.
     """
+    # Check if React build exists
+    static_index = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.exists(static_index):
+        return FileResponse(static_index)
+    
+    # Fall back to old template
     props = read_properties(db, include_off_market=include_off_market)
     stats = compute_stats(props)
 
@@ -1216,9 +1228,146 @@ def api_properties(db: str = DB_DEFAULT, on_market: Optional[bool] = None, limit
             'sqft': p.get('sqft'),
             'property_type': p.get('property_type'),
             'address': p.get('address'),
+            'images': p.get('images', []),
             'on_market': bool(p.get('on_market'))
         })
     return JSONResponse(content=out)
+
+@app.get("/api/dashboard")
+def api_dashboard(db: str = DB_DEFAULT, include_off_market: bool = True):
+    """
+    API endpoint to return dashboard data as JSON for React frontend.
+    Args:
+        db (str): Path to the SQLite database file.
+        include_off_market (bool): If True, include off-market properties.
+    Returns:
+        JSONResponse: Dashboard data including stats, chart URIs, and recent listings.
+    """
+    props = read_properties(db, include_off_market=include_off_market)
+    stats = compute_stats(props)
+
+    # Use caching for plot URIs based on DB hash
+    chart_list = []
+    
+    try:
+        uri = get_cached_plot('price_dist', db, fig_price_distribution, props)
+        chart_list.append({"title": "Price distribution", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Price distribution", "image": None})
+    
+    try:
+        uri = get_cached_plot('beds', db, fig_beds_distribution, props)
+        chart_list.append({"title": "Bedrooms distribution", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Bedrooms distribution", "image": None})
+    
+    try:
+        uri = get_cached_plot('ptype', db, fig_property_type_share, props)
+        chart_list.append({"title": "Property type share", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Property type share", "image": None})
+    
+    try:
+        uri = get_cached_plot('sqft', db, fig_price_vs_sqft, props)
+        chart_list.append({"title": "Price vs sqft", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Price vs sqft", "image": None})
+    
+    try:
+        uri = get_cached_plot('price_per_sqft_vs_beds', db, fig_price_per_sqft_vs_beds, props)
+        chart_list.append({"title": "Price per Sqft vs Beds", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Price per Sqft vs Beds", "image": None})
+    
+    try:
+        uri = get_cached_plot('boxplot_price_by_type', db, fig_boxplot_price_by_type, props)
+        chart_list.append({"title": "Boxplot Price by Type", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Boxplot Price by Type", "image": None})
+    
+    try:
+        uri = get_cached_plot('boxplot_ppsqft_by_type', db, fig_boxplot_ppsqft_by_type, props)
+        chart_list.append({"title": "Boxplot Price/Sqft by Type", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Boxplot Price/Sqft by Type", "image": None})
+    
+    try:
+        uri = get_cached_plot('hist_sqft', db, fig_hist_sqft, props)
+        chart_list.append({"title": "Histogram Sqft", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Histogram Sqft", "image": None})
+    
+    try:
+        uri = get_cached_plot('bar_avg_price_by_beds', db, fig_bar_avg_price_by_beds, props)
+        chart_list.append({"title": "Bar Avg Price by Beds", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Bar Avg Price by Beds", "image": None})
+    
+    try:
+        uri = get_cached_plot('line_price_time', db, fig_line_price_time, props)
+        chart_list.append({"title": "Line Price Time", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Line Price Time", "image": None})
+    
+    try:
+        uri = get_cached_plot('boxplot_sqft_by_type', db, fig_boxplot_sqft_by_type, props)
+        chart_list.append({"title": "Boxplot Sqft by Type", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Boxplot Sqft by Type", "image": None})
+    
+    try:
+        uri = get_cached_plot('scatter_price_vs_beds', db, fig_scatter_price_vs_beds, props)
+        chart_list.append({"title": "Scatter Price vs Beds", "image": uri})
+    except Exception:
+        chart_list.append({"title": "Scatter Price vs Beds", "image": None})
+
+    # helper to format money
+    def fm(n):
+        return f"£{n:,}" if n is not None else "n/a"
+
+    # recent listings (max 20)
+    recent_listings = []
+    for p in stats["recent"][:20]:
+        imgs = p.get("images") or []
+        thumb = imgs[0] if imgs else ""
+        price = fm(p.get("price"))
+        beds = p.get("beds") or "-"
+        sqft = p.get("sqft") or "-"
+        addr = p.get("address") or p.get("title") or "No address"
+        days = ""
+        first = parse_iso_datetime(p.get("first_seen"))
+        last = parse_iso_datetime(p.get("last_seen")) or (datetime.utcnow() if p.get("on_market") == 1 else None)
+        if first:
+            end = last or datetime.utcnow()
+            try:
+                days = f"{max(0, (end - first).days)} days"
+            except Exception:
+                days = ""
+        recent_listings.append({
+            "url": p.get("url") or "#",
+            "thumb": thumb,
+            "addr": addr,
+            "price": price,
+            "beds": beds,
+            "sqft": sqft,
+            "days": days
+        })
+
+    stats_list = []
+    stats_list.append({"label": "Total listings", "value": str(stats['total'])})
+    stats_list.append({"label": "On market", "value": str(stats['on_market'])})
+    stats_list.append({"label": "Avg price", "value": fm(stats['avg_price'])})
+    stats_list.append({"label": "Median price", "value": fm(stats['median_price'])})
+    stats_list.append({"label": "Avg sqft", "value": str(stats['avg_sqft']) if stats['avg_sqft'] else 'n/a'})
+    stats_list.append({"label": "Avg beds", "value": str(stats['avg_beds']) if stats['avg_beds'] else 'n/a'})
+    avg_listing_display = f"{stats['avg_listing_days']} days" if stats.get('avg_listing_days') else "n/a"
+    stats_list.append({"label": "Avg listing length", "value": avg_listing_display})
+
+    return JSONResponse(content={
+        "stats": stats_list,
+        "charts": chart_list,
+        "recent_listings": recent_listings
+    })
 
 ##################################################
 # LLM assistant and tool calls
@@ -1371,6 +1520,19 @@ async def assistant_api(request: Request):
         reply = getattr(result, "content", str(result))
 
     return {"reply": reply}
+
+# Catch-all route for React Router (must be last)
+@app.get("/{full_path:path}")
+def catch_all(full_path: str):
+    """
+    Catch-all route to serve React app for client-side routing.
+    """
+    if full_path.startswith("api/") or full_path.startswith("plots/"):
+        raise HTTPException(status_code=404, detail="Not found")
+    static_index = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.exists(static_index):
+        return FileResponse(static_index)
+    raise HTTPException(status_code=404, detail="Not found")
 
 ##################################################
 # main
