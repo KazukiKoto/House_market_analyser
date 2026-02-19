@@ -1,12 +1,14 @@
 import re
+import os
 import time
 import argparse
+import tempfile
 from urllib.parse import urljoin, urlencode
 import requests
 from bs4 import BeautifulSoup
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -51,14 +53,169 @@ def candidate_listing_anchors(soup):
             anchors.append(a)
     return anchors
 
-# Replace the generic extraction with a parser that targets the OnTheMarket property-card markup.
-def parse_search_results(soup, base_url):
+def _extract_json_ld_properties(soup, base_url=''):
     """
-    Extract property listings from an OnTheMarket search-results page.
-    Returns list of dicts: id, url, title, price, beds, address, images
+    Strategy 1: Extract properties from JSON-LD structured data.
+    Most reliable but may not always be present.
+    """
+    properties = []
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            data = json.loads(script.string)
+            # Handle both single objects and arrays
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                # Only accept RealEstateListing or Product with specific property indicators
+                item_type = item.get('@type', '')
+                if item_type not in ['Product', 'RealEstateListing', 'Offer']:
+                    continue
+
+                # Validate it's actually a property listing
+                # Check for URL and that it contains /details/ (property detail page)
+                raw_url = item.get('url', '')
+                if not raw_url or '/details/' not in raw_url:
+                    continue
+                url = urljoin(base_url, raw_url)
+
+                # Parse price: JSON-LD offers.price may be a number or a formatted string
+                offers = item.get('offers', {})
+                if isinstance(offers, list):
+                    offers = offers[0] if offers else {}
+                price_raw = offers.get('price') if isinstance(offers, dict) else None
+                if isinstance(price_raw, (int, float)):
+                    price = round(price_raw)
+                elif isinstance(price_raw, str):
+                    price = normalize_price(price_raw)
+                else:
+                    price = None
+
+                prop = {
+                    'url': url,
+                    'title': item.get('name', ''),
+                    'price': price,
+                    'address': item.get('address', {}).get('streetAddress', '') if isinstance(item.get('address'), dict) else '',
+                    'beds': None,
+                    'images': [],
+                    'id': None
+                }
+
+                # Only add if we have minimum viable data
+                if prop['url']:
+                    properties.append(prop)
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            continue
+    return properties
+
+
+def _extract_from_detail_links(soup, base_url):
+    """
+    Strategy 2: Find all /details/ links and extract surrounding context.
+    Works even when page structure changes completely.
+    """
+    properties = []
+    seen_urls = set()
+    
+    # Find all links to property detail pages
+    for link in soup.select('a[href*="/details/"]'):
+        href = link.get('href', '')
+        if not href or '/details/' not in href:
+            continue
+            
+        url = urljoin(base_url, href)
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        
+        # Extract property ID from URL
+        m = re.search(r'/details/(\d+)/', href)
+        pid = m.group(1) if m else None
+        
+        # Find the containing card/article/div (go up the tree)
+        card = link
+        for _ in range(10):  # Go up max 10 levels
+            card = card.parent
+            if not card:
+                break
+            # Stop if we found a likely container
+            tag_name = card.name if hasattr(card, 'name') else ''
+            if tag_name in ['article', 'li', 'section']:
+                break
+            # Or if it has property-related classes
+            classes = ' '.join(card.get('class', [])).lower()
+            if any(keyword in classes for keyword in ['property', 'card', 'listing', 'result']):
+                break
+        
+        if not card:
+            card = link.parent
+        
+        # Extract text content from the card
+        card_text = card.get_text(' ', strip=True) if card else ''
+        
+        # Extract title - try multiple strategies
+        title = ''
+        # Try semantic markup first
+        title_el = (card.select_one('[itemprop="name"]') or 
+                   card.select_one('[itemprop="address"]') or
+                   link)  # Fall back to link text
+        if title_el:
+            title = title_el.get_text(strip=True)
+        
+        # Extract price from card text
+        price = normalize_price(card_text)
+        
+        # Extract beds from card text
+        beds = normalize_beds(card_text)
+        
+        # Extract address - prefer semantic/CSS-based extraction, then fall back to heuristics
+        address = ''
+        address_el = (card.select_one('[itemprop="streetAddress"]') or
+                      card.select_one('[itemprop="address"]') or
+                      card.select_one('.address') or
+                      card.select_one('[class*="address"]'))
+        if address_el:
+            address = address_el.get_text(' ', strip=True)
+        else:
+            addr_indicators = [
+                'road', 'street', 'avenue', 'drive', 'lane', 'close',
+                'court', 'place', 'way', 'square', 'terrace', 'crescent',
+                'park', 'gardens', 'rise'
+            ]
+            for text_node in card.find_all(string=True):
+                text = text_node.strip()
+                if not text:
+                    continue
+                lower_text = text.lower()
+                if any(indicator in lower_text for indicator in addr_indicators):
+                    address = text
+                    break
+        
+        # Extract images
+        images = set()
+        for img in card.select('img[src], img[data-src]'):
+            src = img.get('src') or img.get('data-src') or ''
+            if src and 'data:image' not in src:  # Skip inline data URIs
+                if ',' in src:  # Handle srcset
+                    src = src.split(',')[0].strip().split(' ')[0]
+                images.add(urljoin(base_url, src))
+        
+        properties.append({
+            'id': pid or url,
+            'url': url,
+            'title': title or address or (f'Property {pid}' if pid is not None else url),
+            'price': price,
+            'beds': beds,
+            'address': address,
+            'images': sorted(images)
+        })
+    
+    return properties
+
+
+def _extract_legacy_format(soup, base_url):
+    """
+    Strategy 3: Try the old CSS selectors (for backward compatibility).
     """
     results = []
-    # Prefer the explicit results container; fallback to searching cards anywhere
     container = soup.select_one('ul.grid-list-tabcontent, ul.grid-list')
     if container:
         cards = container.select('li.otm-PropertyCard, li.otm-PropertyCard.spotlight, li.otm-PropertyCard.premium')
@@ -66,7 +223,6 @@ def parse_search_results(soup, base_url):
         cards = soup.select('li.otm-PropertyCard')
 
     for card in cards:
-        # URL: meta[itemprop="url"] content or first /details/ anchor
         rel = None
         meta_url = card.select_one('meta[itemprop="url"]')
         if meta_url and meta_url.get('content'):
@@ -79,35 +235,28 @@ def parse_search_results(soup, base_url):
             continue
         url = urljoin(base_url, rel)
 
-        # Title
         title_el = card.select_one('[itemprop="name"]') or card.select_one('.title a') or card.select_one('.title')
         title = title_el.get_text(strip=True) if title_el else ''
 
-        # Price
         price_el = card.select_one('.otm-Price .price') or card.select_one('.price')
         price_text = price_el.get_text(' ', strip=True) if price_el else ''
         price = normalize_price(price_text or '')
 
-        # Address
         addr_el = card.select_one('span.address a') or card.select_one('span.address')
         address = addr_el.get_text(' ', strip=True) if addr_el else ''
 
-        # Beds
         beds_el = card.select_one('[itemprop="numberOfBedrooms"]')
         beds = normalize_beds(beds_el.get_text(' ', strip=True)) if beds_el else None
 
-        # Images (collect itemprop contentUrl or img src/data-src attributes)
         images = set()
         for img in card.select('img[itemprop="contentUrl"], img[src], img[data-src], img[data-srcset]'):
             src = img.get('src') or img.get('data-src') or img.get('data-srcset') or ''
             if not src:
                 continue
-            # if srcset-like value, take first URL
             if ',' in src:
                 src = src.split(',')[0].strip().split(' ')[0]
             images.add(urljoin(base_url, src))
 
-        # id from data-property-id or the details URL
         pid = None
         save_span = card.select_one('.save[data-property-id]')
         if save_span:
@@ -127,6 +276,55 @@ def parse_search_results(soup, base_url):
             'images': sorted(images)
         })
     return results
+
+
+def parse_search_results(soup, base_url):
+    """
+    ROBUST multi-strategy property extraction from OnTheMarket search results.
+    
+    Uses multiple extraction strategies in priority order:
+    1. JSON-LD structured data (most reliable)
+    2. URL pattern matching with context extraction (works with any layout)
+    3. Legacy CSS selectors (backward compatibility)
+    
+    Returns list of dicts: id, url, title, price, beds, address, images
+    """
+
+    # Try Strategy 1: JSON-LD
+    print('[Strategy 1] Trying JSON-LD extraction...', flush=True)
+    results = _extract_json_ld_properties(soup, base_url)
+    if results and any(r.get('price') is not None for r in results):
+        print(f'[Strategy 1] [OK] Found {len(results)} properties via JSON-LD', flush=True)
+        return results
+    elif results:
+        print('[Strategy 1] JSON-LD found but data incomplete, trying Strategy 2 to enrich...', flush=True)
+    else:
+        print('[Strategy 1] [FAIL] No JSON-LD data found', flush=True)
+
+    # Try Strategy 2: Detail links with context
+    print('[Strategy 2] Trying URL pattern matching...', flush=True)
+    results = _extract_from_detail_links(soup, base_url)
+    if results:
+        print(f'[Strategy 2] [OK] Found {len(results)} properties via URL patterns', flush=True)
+        return results
+    print('[Strategy 2] [FAIL] No detail links found', flush=True)
+
+    # Try Strategy 3: Legacy selectors
+    print('[Strategy 3] Trying legacy CSS selectors...', flush=True)
+    results = _extract_legacy_format(soup, base_url)
+    if results:
+        print(f'[Strategy 3] [OK] Found {len(results)} properties via legacy selectors', flush=True)
+        return results
+    print('[Strategy 3] [FAIL] Legacy selectors failed', flush=True)
+    
+    # If all strategies fail, log debugging info
+    print('[ERROR] All extraction strategies failed!', flush=True)
+    print(f'Page title: {soup.title.string if soup.title else "N/A"}', flush=True)
+    print(f'Page length: {len(str(soup))} chars', flush=True)
+    print(f'Links found: {len(soup.select("a[href]"))}', flush=True)
+    print(f'Scripts found: {len(soup.select("script"))}', flush=True)
+    
+    return []
 
 
 def dedupe_listings(listings):
@@ -170,14 +368,34 @@ def build_search_urls(site, location, pages=1):
 def get_total_results_from_soup(soup):
     """
     Find the total number of results on an OnTheMarket search page.
-    Looks for the otm-ResultCount area or a 'NNN results' text.
+    Tries multiple strategies to extract the result count.
     """
-    # Try the explicit container first
+    # Strategy 1: Try the explicit container first
     rc = soup.select_one('.otm-ResultCount')
-    text = rc.get_text(' ', strip=True) if rc else soup.get_text(' ', strip=True)
-    m = re.search(r'([\d,]+)\s+results', text, re.I)
+    text = rc.get_text(' ', strip=True) if rc else None
+    if text:
+        m = re.search(r'([\d,]+)\s+results?', text, re.I)
+        if m:
+            count = int(m.group(1).replace(',', ''))
+            print(f'[Total Results] Found {count} from .otm-ResultCount', flush=True)
+            return count
+    
+    # Strategy 2: Search anywhere on the page
+    page_text = soup.get_text(' ', strip=True)
+    m = re.search(r'([\d,]+)\s+(?:results?|properties)', page_text, re.I)
     if m:
-        return int(m.group(1).replace(',', ''))
+        count = int(m.group(1).replace(',', ''))
+        print(f'[Total Results] Found {count} from page text', flush=True)
+        return count
+    
+    # Strategy 3: Count the number of detail links as a minimum estimate
+    detail_links = len(soup.select('a[href*="/details/"]'))
+    if detail_links > 0:
+        print(f'[Total Results] Could not find count, found {detail_links} properties on page', flush=True)
+        # Don't return the count, let caller handle pagination differently
+    else:
+        print('[Total Results] Could not determine result count', flush=True)
+    
     return None
 
 
@@ -397,7 +615,7 @@ def save_property(conn, prop):
         return None
 
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     stored_id = str(prop.get('id') or prop.get('url'))
     # try to find existing DB id
     existing_id = _find_existing(conn, prop)
@@ -474,7 +692,7 @@ def mark_off_market(conn, seen_ids):
     Set off_market_at to now and on_market=0.
     """
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     # Build placeholders for NOT IN if any seen_ids, else mark all on_market rows off-market
     if seen_ids:
         placeholders = ','.join('?' for _ in seen_ids)
@@ -488,55 +706,96 @@ def mark_off_market(conn, seen_ids):
 
 
 def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=None, delay=1.0, db_conn=None, db_lock=None, max_workers=5):
+    print(f'\n========================================', flush=True)
+    print(f'Starting scrape: {site} / {location}', flush=True)
+    print(f'Parameters: pages={pages}, min_price={min_price}, max_price={max_price}, min_beds={min_beds}', flush=True)
+    print(f'========================================\n', flush=True)
+    
     # Start by building only the first-page URL so we can read the total results
     first_urls = build_search_urls(site, location, pages=1)
     if not first_urls:
+        print('[ERROR] Could not build search URLs', flush=True)
         return []
 
     listings = []
 
     # Fetch first page
     first_url = first_urls[0]
+    print(f'[Page 1] Fetching {first_url}', flush=True)
     try:
         html = fetch(first_url)
+        print(f'[Page 1] Received {len(html)} bytes', flush=True)
     except Exception as e:
-        print(f'Failed to fetch {first_url}: {e}')
+        print(f'[ERROR] Failed to fetch {first_url}: {e}', flush=True)
         return []  # cannot proceed without first page
+    
     soup = BeautifulSoup(html, 'html.parser')
     found = parse_search_results(soup, first_url)
+    print(f'[Page 1] Extracted {len(found)} properties', flush=True)
     listings.extend(found)
+    
+    # If no results on first page, warn and abort
+    if not found:
+        print('[WARNING] No properties found on first page - aborting', flush=True)
+        print('[DEBUG] Page title:', soup.title.string if soup.title else 'N/A', flush=True)
+        # Save a debug copy of the HTML only when explicitly requested
+        if os.environ.get('SCRAPER_DEBUG'):
+            try:
+                debug_path = os.path.join(tempfile.gettempdir(), 'debug_page.html')
+                with open(debug_path, 'w', encoding='utf-8') as f:
+                    f.write(html)
+                print(f'[DEBUG] Saved page HTML to {debug_path} for inspection', flush=True)
+            except OSError as e:
+                print(f'[DEBUG] Could not save debug HTML: {e}', flush=True)
+        return []
 
     # Determine total results and total pages (30 per page)
     total = get_total_results_from_soup(soup)
     if total is None:
         # fallback to single page behaviour if we can't detect total
         total_pages = pages
+        print(f'[Pagination] Using requested pages: {total_pages}', flush=True)
     else:
         per_page = 30
         total_pages = (total + per_page - 1) // per_page
+        print(f'[Pagination] Total results: {total}, pages: {total_pages}', flush=True)
 
     # Build all page URLs
     all_urls = build_search_urls(site, location, pages=total_pages)
+    print(f'[Pagination] Will fetch {len(all_urls)} pages', flush=True)
 
     # Fetch remaining pages (skip the first which we already fetched)
-    for url in all_urls[1:]:
+    for i, url in enumerate(all_urls[1:], start=2):
+        print(f'[Page {i}] Fetching {url}', flush=True)
         try:
             html = fetch(url)
         except Exception as e:
-            print(f'Failed to fetch {url}: {e}')
+            print(f'[Page {i}] ERROR: {e}', flush=True)
             continue
         soup = BeautifulSoup(html, 'html.parser')
         found = parse_search_results(soup, url)
+        print(f'[Page {i}] Extracted {len(found)} properties', flush=True)
         listings.extend(found)
         time.sleep(delay)
 
+    print(f'\n[Summary] Total properties extracted: {len(listings)}', flush=True)
+    
     # Deduplicate search results by url
+    before_dedup = len(listings)
     listings = dedupe_listings(listings)
+    print(f'[Dedup] Removed {before_dedup - len(listings)} duplicates, {len(listings)} unique properties', flush=True)
 
     # Filter by price/beds as before (applies to summary price/beds)
+    before_filter = len(listings)
     listings = filter_listings(listings, min_price=min_price, max_price=max_price, min_beds=min_beds)
+    print(f'[Filter] Removed {before_filter - len(listings)} properties, {len(listings)} remain after filtering', flush=True)
+
+    if not listings:
+        print('[WARNING] No properties remaining after filtering', flush=True)
+        return []
 
     # Now fetch each property page and enrich the data, printing progress and details as obtained
+    print(f'\n[Details] Fetching detailed information for {len(listings)} properties...', flush=True)
     detailed = []
     seen_urls = set()
     seen_ids = set()
@@ -639,16 +898,24 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
             print_progress_bar(completed, attempts, prefix='Progress', suffix=f'Elapsed: {elapsed:.1f}s', length=40)
 
     # summary check: attempts vs successes
-    print(f'Property fetch attempts: {attempts}, successes: {success_count}')
+    print(f'\n[Details] Property fetch attempts: {attempts}, successes: {success_count}', flush=True)
     if attempts != success_count:
-        print('Warning: number of successful fetches does not match attempts')
+        print(f'[Details] Warning: {attempts - success_count} properties failed to fetch details', flush=True)
 
     # After processing all properties, mark any previously on-market DB entries not seen this run as off-market
     if db_conn:
         try:
             mark_off_market(db_conn, seen_ids)
+            print(f'[Database] Updated on-market status for properties', flush=True)
         except Exception as e:
-            print(f'Failed to mark off-market properties: {e}')
+            print(f'[Database] ERROR marking off-market properties: {e}', flush=True)
+
+    print(f'\n========================================', flush=True)
+    print(f'SCRAPE COMPLETE', flush=True)
+    print(f'Total properties found: {len(detailed)}', flush=True)
+    if db_conn:
+        print(f'Properties saved to database: {len(seen_ids)}', flush=True)
+    print(f'========================================\n', flush=True)
 
     return detailed
 

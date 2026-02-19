@@ -16,16 +16,3 @@ services:
     # Add extra_hosts to allow container to reach host machine for Ollama
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-  # Uncomment if you want to run Ollama in a container
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: ollama
-  #   ports:
-  #     - "11434:11434"
-  #   volumes:
-  #     - ollama-data:/root/.ollama
-  #   restart: unless-stopped
-
-# volumes:
-#   ollama-data:

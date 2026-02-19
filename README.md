@@ -3,12 +3,15 @@
 A Python project for analyzing and visualizing house market data. It includes data scraping, dashboard visualization, and data cleaning tools.
 
 ## Features
+- **Robust web scraping**: Multi-strategy extraction adapts to page layout changes
 - Scrapes property data and stores it in a local database
 - **Automated scraping**: Runs automatically every hour and on application startup
 - Cleans and removes invalid data
 - Interactive dashboard for data visualization
 - HTML templates for web-based UI
 - AI-powered property search assistant
+
+> **Scraping Robustness**: The scraper uses a 3-tier fallback system (JSON-LD → URL patterns → Legacy selectors) that automatically adapts to website changes. See the scraper design notes and in-code documentation for more technical details.
 
 ## Project Structure
 - `scraper.py`: Scrapes house market data
@@ -111,15 +114,24 @@ make clean      # Clean up everything
 
 **Data Persistence:** The `./data` directory is mounted as a volume, so databases persist on your host machine.
 
-**Ollama Integration:** This application uses Ollama for AI features. You have two options:
+**Ollama Integration:** This application uses Ollama for AI features. Make sure Ollama is installed and running on your host machine:
 
-- **Option A (Recommended):** Use Ollama on host machine
-  - Container accesses it via `host.docker.internal:11434`
-  - No additional configuration needed
+1. **Download Ollama:** https://ollama.com/download
+2. **Install Ollama** on your host machine
+3. **Pull the required model:**
+   ```bash
+   ollama pull llama3.1
+   ```
+4. **Start Ollama** (usually runs automatically on installation)
+   ```bash
+   ollama serve  # If not running automatically
+   ```
+5. **Start the containers:**
+   ```bash
+   make start
+   ```
 
-- **Option B:** Run Ollama in Docker
-  - Uncomment the `ollama` service section in `docker-compose.yml`
-  - Update `OLLAMA_HOST=http://ollama:11434` in the environment variables
+The container will automatically connect to Ollama on your host via `host.docker.internal:11434`.
 
 **Running the Scraper in Docker:**
 ```bash
@@ -144,7 +156,7 @@ docker-compose exec dashboard /bin/bash
 
 **Troubleshooting:**
 - If port 8338 is in use, change the port mapping in `docker-compose.yml` to a different port like `"8080:8000"`
-- Ensure Ollama is running on your host machine or configured in Docker
+- Ensure Ollama is running on your host machine
 - On Linux, you may need `--network=host` instead of `host.docker.internal`
 
 ### Option 2: Local Python Installation
