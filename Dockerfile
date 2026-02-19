@@ -46,7 +46,9 @@ COPY --from=frontend-builder /app/static /app/static
 # Copy application files
 COPY dashboard.py .
 COPY scraper.py .
+COPY scheduler.py .
 COPY init_db.py .
+COPY migrate_db.py .
 COPY entrypoint.sh .
 COPY templates/ templates/
 

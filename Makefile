@@ -1,4 +1,4 @@
-.PHONY: help start stop restart rebuild logs shell clean scraper status down up build init-db test check-db check-docker pre-flight health build-frontend
+.PHONY: help start stop restart rebuild logs shell clean scraper migrate-db-container status down up build init-db migrate-db test check-db check-docker pre-flight health build-frontend
 
 # Default target
 help:
@@ -16,6 +16,7 @@ help:
 	@echo.
 	@echo SETUP COMMANDS:
 	@echo   make init-db    - Initialize the database
+	@echo   make migrate-db - Migrate existing database to latest schema
 	@echo   make build-frontend - Build React frontend locally
 	@echo   make test       - Run comprehensive tests
 	@echo   make pre-flight - Check prerequisites before starting
@@ -69,6 +70,15 @@ init-db:
 	@echo  Initializing Database
 	@echo ========================================
 	@powershell -Command "if (Test-Path 'properties.db') { Write-Host '[INFO] Database already exists. Skipping creation.' -ForegroundColor Cyan } else { python init_db.py; if ($$?) { Write-Host '[SUCCESS] Database created successfully!' -ForegroundColor Green } else { Write-Host '[ERROR] Failed to create database' -ForegroundColor Red; exit 1 } }"
+	@echo.
+
+# Migrate existing database to latest schema
+migrate-db:
+	@echo.
+	@echo ========================================
+	@echo  Migrating Database Schema
+	@echo ========================================
+	@powershell -Command "if (Test-Path 'properties.db') { python migrate_db.py properties.db; if ($$?) { Write-Host '[SUCCESS] Database migrated successfully!' -ForegroundColor Green } else { Write-Host '[ERROR] Migration failed' -ForegroundColor Red; exit 1 } } else { Write-Host '[ERROR] Database not found. Run: make init-db first' -ForegroundColor Red; exit 1 }"
 	@echo.
 
 # Build frontend locally (optional, mainly for development)
@@ -267,6 +277,15 @@ scraper:
 	@echo  Running Scraper
 	@echo ========================================
 	@docker compose exec dashboard python scraper.py $(ARGS)
+	@echo.
+
+# Migrate database inside container
+migrate-db-container:
+	@echo.
+	@echo ========================================
+	@echo  Migrating Database in Container
+	@echo ========================================
+	@docker compose exec dashboard python /app/migrate_db.py /app/data/properties.db
 	@echo.
 
 # Show container status

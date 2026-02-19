@@ -10,6 +10,10 @@ services:
     environment:
       # Use database from data directory
       - DB_DEFAULT=/app/data/properties.db
+      # Auto-populate database with initial data on first run (set to false to disable)
+      - AUTO_POPULATE=${AUTO_POPULATE:-true}
+      # Enable periodic scraper scheduler (runs every hour, set to false to disable)
+      - ENABLE_SCHEDULER=${ENABLE_SCHEDULER:-true}
       # If using Ollama, specify the host
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
     restart: unless-stopped

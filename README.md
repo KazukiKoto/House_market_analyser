@@ -4,6 +4,7 @@ A Python project for analyzing and visualizing house market data. It includes da
 
 ## Features
 - **Robust web scraping**: Multi-strategy extraction adapts to page layout changes
+- **Agent tracking & blacklist**: Automatically detects and filters out real estate agent addresses
 - Scrapes property data and stores it in a local database
 - **Automated scraping**: Runs automatically every hour and on application startup
 - Cleans and removes invalid data
@@ -12,6 +13,8 @@ A Python project for analyzing and visualizing house market data. It includes da
 - AI-powered property search assistant
 
 > **Scraping Robustness**: The scraper uses a 3-tier fallback system (JSON-LD → URL patterns → Legacy selectors) that automatically adapts to website changes. See the scraper design notes and in-code documentation for more technical details.
+
+> **Agent Address Filtering**: The scraper intelligently identifies real estate agent addresses using keyword detection and maintains a dynamic blacklist. When the same address appears frequently for one agent (3+ times), it's automatically blacklisted to improve address accuracy.
 
 ## Frontend
 The project now features a modern React-based dashboard with:
@@ -36,11 +39,13 @@ npm run build
 The built static files are served by FastAPI from the `static/` directory.
 
 ## Project Structure
-- `scraper.py`: Scrapes house market data
-- `remove_invalid_data.py`: Cleans the database
+- `scraper.py`: Scrapes house market data with agent tracking and blacklist
+- `scheduler.py`: Periodic scheduler for automated hourly scraping
+- `init_db.py`: Database initialization with schema for properties and agent blacklist
 - `dashboard.py`: Runs the dashboard and visualizations
 - `templates/`: HTML templates for the dashboard
-- `properties.db`: SQLite database storing property data
+- `frontend/`: React-based modern UI with Tailwind CSS
+- `properties.db`: SQLite database storing property data and agent blacklist
 
 ## Setup
 
@@ -236,21 +241,52 @@ If you want to build your own housing dataset by scraping other websites:
 ## Automated Property Scraping
 
 The application now includes **automated scraping** that runs:
-- **On startup**: Initial scrape when the container starts
-- **Every hour**: Scheduled scrape runs automatically
+- **On startup**: Initial scrape when the container starts (if database is empty)
+- **Every hour**: Scheduled scrape runs automatically in the background
 
-You can configure the scraping behavior using environment variables. See [SCRAPING_AUTOMATION.md](SCRAPING_AUTOMATION.md) for detailed configuration options.
+### Configuration
 
-### Quick Configuration Example
+You can configure the scraping behavior using environment variables in `docker-compose.yml`:
 
-Add these to your `docker-compose.yml` environment section:
 ```yaml
 environment:
-  - SCRAPER_LOCATION=worcester
-  - SCRAPER_MIN_PRICE=200000
-  - SCRAPER_MAX_PRICE=500000
-  - SCRAPER_MIN_BEDS=3
+  # Auto-populate database with initial data on first run
+  - AUTO_POPULATE=true  # Set to false to disable initial population
+  
+  # Enable periodic scraper scheduler (runs every hour)
+  - ENABLE_SCHEDULER=true  # Set to false to disable hourly scraping
+  
+  # Scraping parameters (optional)
+  - SCRAPE_LOCATION=worcester
+  - SCRAPE_SITE=onthemarket
 ```
+
+### Disabling Automated Scraping
+
+If you prefer to run the scraper manually:
+
+```yaml
+environment:
+  - AUTO_POPULATE=false      # Skip initial population
+  - ENABLE_SCHEDULER=false   # Disable hourly scraping
+```
+
+Then run the scraper manually when needed:
+```bash
+make scraper
+# Or with custom parameters
+make scraper ARGS="--location birmingham --min-price 200000"
+```
+
+### Agent Address Blacklist
+
+The scraper automatically tracks real estate agent addresses:
+- Detects agent addresses using keyword patterns
+- Maintains a blacklist of frequently-seen agent addresses
+- When an address appears 3+ times for the same agent, it's blacklisted
+- Blacklisted addresses are automatically excluded from property listings
+
+This ensures you get accurate property addresses, not agent office locations.
 
 ## Setting Up Scraper or Dashboard as a Startup Task (Legacy)
 
