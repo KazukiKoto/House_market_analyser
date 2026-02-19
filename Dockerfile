@@ -2,17 +2,29 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /app
 
-# System dependencies
+# System dependencies including Node.js for frontend build
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
 # Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy frontend files and build
+COPY frontend/package*.json frontend/
+WORKDIR /app/frontend
+RUN npm ci
+WORKDIR /app
+COPY frontend/ frontend/
+WORKDIR /app/frontend
+RUN npm run build
+WORKDIR /app
 
 # Copy application files
 COPY dashboard.py .

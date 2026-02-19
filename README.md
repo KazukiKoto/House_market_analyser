@@ -7,11 +7,33 @@ A Python project for analyzing and visualizing house market data. It includes da
 - Scrapes property data and stores it in a local database
 - **Automated scraping**: Runs automatically every hour and on application startup
 - Cleans and removes invalid data
-- Interactive dashboard for data visualization
-- HTML templates for web-based UI
+- **Modern React + Tailwind CSS UI**: Beautiful, responsive dashboard with dark/light mode
+- Interactive charts and visualizations
 - AI-powered property search assistant
 
 > **Scraping Robustness**: The scraper uses a 3-tier fallback system (JSON-LD → URL patterns → Legacy selectors) that automatically adapts to website changes. See the scraper design notes and in-code documentation for more technical details.
+
+## Frontend
+The project now features a modern React-based dashboard with:
+- 🎨 Clean, responsive UI built with Tailwind CSS
+- 🌓 Persistent dark/light mode toggle
+- 📊 Interactive charts with lightbox view
+- 🚀 Fast performance with Vite
+- 📱 Mobile-friendly design
+
+The frontend is automatically built during Docker build. For local development:
+
+```bash
+# Build frontend locally (optional)
+make build-frontend
+
+# Or manually
+cd frontend
+npm install
+npm run build
+```
+
+The built static files are served by FastAPI from the `static/` directory.
 
 ## Project Structure
 - `scraper.py`: Scrapes house market data
@@ -70,10 +92,11 @@ The project includes a Makefile for easy container management:
 
 **Setup & Testing:**
 ```bash
-make test       # Run comprehensive system tests
-make init-db    # Initialize the database
-make pre-flight # Check all prerequisites
-make health     # Check if dashboard is healthy
+make test          # Run comprehensive system tests
+make init-db       # Initialize the database
+make build-frontend # Build React frontend locally
+make pre-flight    # Check all prerequisites
+make health        # Check if dashboard is healthy
 ```
 
 **Container Management:**

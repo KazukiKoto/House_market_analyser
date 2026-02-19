@@ -1,4 +1,4 @@
-.PHONY: help start stop restart rebuild logs shell clean scraper status down up build init-db test check-db check-docker pre-flight health
+.PHONY: help start stop restart rebuild logs shell clean scraper status down up build init-db test check-db check-docker pre-flight health build-frontend
 
 # Default target
 help:
@@ -16,6 +16,7 @@ help:
 	@echo.
 	@echo SETUP COMMANDS:
 	@echo   make init-db    - Initialize the database
+	@echo   make build-frontend - Build React frontend locally
 	@echo   make test       - Run comprehensive tests
 	@echo   make pre-flight - Check prerequisites before starting
 	@echo   make health     - Check if dashboard is healthy
@@ -70,6 +71,16 @@ init-db:
 	@powershell -Command "if (Test-Path 'properties.db') { Write-Host '[INFO] Database already exists. Skipping creation.' -ForegroundColor Cyan } else { python init_db.py; if ($$?) { Write-Host '[SUCCESS] Database created successfully!' -ForegroundColor Green } else { Write-Host '[ERROR] Failed to create database' -ForegroundColor Red; exit 1 } }"
 	@echo.
 
+# Build frontend locally (optional, mainly for development)
+build-frontend:
+	@echo.
+	@echo ========================================
+	@echo  Building React Frontend
+	@echo ========================================
+	@powershell -Command "if (-not (Test-Path 'frontend/node_modules')) { Write-Host 'Installing npm dependencies...' -ForegroundColor Cyan; Set-Location frontend; npm install; Set-Location .. }"
+	@powershell -Command "Write-Host 'Building frontend...' -ForegroundColor Cyan; Set-Location frontend; npm run build; Set-Location ..; if ($$?) { Write-Host '[SUCCESS] Frontend built successfully!' -ForegroundColor Green; Write-Host 'Static files are in the static/ directory' -ForegroundColor Cyan } else { Write-Host '[ERROR] Frontend build failed' -ForegroundColor Red; exit 1 }"
+	@echo.
+
 # Pre-flight checks before starting
 pre-flight: check-docker
 	@echo ========================================
@@ -81,6 +92,7 @@ pre-flight: check-docker
 	@powershell -Command "if (Test-Path 'requirements.txt') { Write-Host '[OK] requirements.txt found' } else { Write-Host '[ERROR] requirements.txt not found' -ForegroundColor Red; exit 1 }"
 	@powershell -Command "if (Test-Path 'dashboard.py') { Write-Host '[OK] dashboard.py found' } else { Write-Host '[ERROR] dashboard.py not found' -ForegroundColor Red; exit 1 }"
 	@powershell -Command "if (Test-Path 'init_db.py') { Write-Host '[OK] init_db.py found' } else { Write-Host '[ERROR] init_db.py not found' -ForegroundColor Red; exit 1 }"
+	@powershell -Command "if (Test-Path 'frontend') { Write-Host '[OK] frontend directory found' } else { Write-Host '[ERROR] frontend directory not found' -ForegroundColor Red; exit 1 }"
 	@echo Checking database...
 	@powershell -Command "if (Test-Path 'properties.db') { Write-Host '[OK] Database exists' } else { Write-Host '[WARNING] Database not found. Creating it...' -ForegroundColor Yellow; python init_db.py }"
 	@echo.
@@ -104,7 +116,7 @@ test: check-docker
 	@docker compose config -q && echo [PASS] Configuration valid || (echo [FAIL] Configuration invalid && exit 1)
 	@echo.
 	@echo [TEST 4/6] Checking required files...
-	@powershell -Command "$$files = @('dashboard.py', 'scraper.py', 'init_db.py', 'requirements.txt', 'Dockerfile', 'docker-compose.yml'); $$missing = @(); foreach ($$f in $$files) { if (-not (Test-Path $$f)) { $$missing += $$f } }; if ($$missing.Count -eq 0) { Write-Host '[PASS] All required files present' } else { Write-Host '[FAIL] Missing files:' $$missing -ForegroundColor Red; exit 1 }"
+	@powershell -Command "$$files = @('dashboard.py', 'scraper.py', 'init_db.py', 'requirements.txt', 'Dockerfile', 'docker-compose.yml', 'frontend'); $$missing = @(); foreach ($$f in $$files) { if (-not (Test-Path $$f)) { $$missing += $$f } }; if ($$missing.Count -eq 0) { Write-Host '[PASS] All required files present' } else { Write-Host '[FAIL] Missing files:' $$missing -ForegroundColor Red; exit 1 }"
 	@echo.
 	@echo [TEST 5/6] Checking database...
 	@powershell -Command "if (Test-Path 'properties.db') { Write-Host '[PASS] Database exists' } else { Write-Host '[WARNING] Database not found - will be created' -ForegroundColor Yellow }"
