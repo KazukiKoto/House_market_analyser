@@ -21,13 +21,13 @@ PRICE_RE = re.compile(r'£\s?([\d,]+)')
 BEDS_RE = re.compile(r'(\d+)\s*(?:bed|beds|br|bedroom|bedrooms)\b', re.I)
 SQFT_RE = re.compile(r'([\d,]+)\s*(?:sq\s*ft|sqft|ft²|sq\.)', re.I)
 
-# Agent address detection keywords
+# Agent address detection keywords (used with whole-word matching to reduce false positives)
 AGENT_KEYWORDS = [
-    'estate agent', 'estate agents', 'letting agent', 'letting agents',
-    'property agent', 'sales & letting', 'sales and letting',
-    'branch office', 'head office', 'office:', 'branch:', 
-    'chartered surveyor', 'surveyors', 'real estate',
-    'rics', 'naea', 'arla', 'tpos', 'ombudsman'
+    r'estate agents?', r'letting agents?',
+    r'property agents?', r'sales & letting', r'sales and letting',
+    r'branch office', r'head office',
+    r'chartered surveyors?',
+    r'\brics\b', r'\bnaea\b', r'\barla\b', r'\btpos\b', r'\bombudsman\b'
 ]
 
 
@@ -40,7 +40,7 @@ def is_agent_address(address_text):
     if not address_text:
         return False
     lower_text = address_text.lower()
-    return any(keyword in lower_text for keyword in AGENT_KEYWORDS)
+    return any(re.search(keyword, lower_text) for keyword in AGENT_KEYWORDS)
 
 
 def extract_agent_name(soup):
@@ -49,26 +49,27 @@ def extract_agent_name(soup):
     Returns agent name as string or None if not found.
     """
     # Try multiple strategies to find agent name
-    # Strategy 1: Look for common agent/office CSS selectors
+    # Strategy 1: Look for specific agent/office CSS selectors (avoid overly broad class-substring matches)
     agent_selectors = [
         '[data-test="agent-name"]', '.agent-name', '.office-name',
-        '[class*="agent"]', '[class*="office"]', '[class*="branch"]',
-        'a[href*="/agent/"]', 'a[href*="/office/"]'
+        'a[href*="/agent/"]', 'a[href*="/office/"]',
+        '[data-test="branch-name"]', '.branch-name'
     ]
     
     for selector in agent_selectors:
         elem = soup.select_one(selector)
         if elem:
             agent_name = elem.get_text(strip=True)
-            if agent_name and len(agent_name) > 3:  # Must be meaningful
+            # Must be meaningful and not suspiciously long (avoid whole paragraphs)
+            if agent_name and 3 < len(agent_name) <= 100:
                 return agent_name
     
     # Strategy 2: Look for text patterns like "Marketed by..."
     page_text = soup.get_text(' ', strip=True)
-    marketed_by = re.search(r'marketed by[:\s]+([^,\n]+)', page_text, re.I)
+    marketed_by = re.search(r'marketed by[:\s]+([A-Za-z0-9 &\'\-\.]+?)(?:,|\n|$)', page_text, re.I)
     if marketed_by:
         agent_name = marketed_by.group(1).strip()
-        if agent_name and len(agent_name) > 3:
+        if agent_name and 3 < len(agent_name) <= 100:
             return agent_name
     
     return None
@@ -520,7 +521,7 @@ def get_total_results_from_soup(soup):
     return None
 
 
-def parse_property_details(soup, fallback=None, db_conn=None):
+def parse_property_details(soup, fallback=None, db_conn=None, db_lock=None):
     """
     Extract detailed fields from an OnTheMarket property page soup.
     Returns dict: price, property_type, beds, sqft, address, title, images, agent_name
@@ -555,7 +556,15 @@ def parse_property_details(soup, fallback=None, db_conn=None):
         addr_text = addr_el.get_text(' ', strip=True)
         if addr_text and not is_agent_address(addr_text):
             # Check if address is blacklisted (if db_conn available)
-            if db_conn and is_blacklisted_address(db_conn, addr_text):
+            is_blacklisted = False
+            if db_conn:
+                # Use db_lock for thread-safe reads consistent with write operations
+                if db_lock:
+                    with db_lock:
+                        is_blacklisted = is_blacklisted_address(db_conn, addr_text)
+                else:
+                    is_blacklisted = is_blacklisted_address(db_conn, addr_text)
+            if is_blacklisted:
                 # Don't skip - keep as alternative
                 blacklisted_addresses.append(addr_text)
             else:
@@ -576,10 +585,6 @@ def parse_property_details(soup, fallback=None, db_conn=None):
             out['address'] = fallback_addr
         else:
             out['address'] = ''
-    
-    # Update blacklist tracking if we have agent name and address
-    if agent_name and out['address'] and db_conn:
-        update_agent_blacklist(db_conn, agent_name, out['address'])
 
     # beds (try itemprop or phrase on page)
     beds = None
@@ -599,7 +604,8 @@ def parse_property_details(soup, fallback=None, db_conn=None):
         'end-terrace', 'end terrace',
         'detached',  # Single types after compounds
         'terraced', 'terrace',
-        'flat', 'maisonette', 'bungalow', 'studio'
+        'flat', 'maisonette', 'bungalow', 'studio',
+        'semi'  # Fallback: standalone 'semi' normalizes to semi-detached
     ]
     page_text = soup.get_text(' ', strip=True).lower()
     ptype = None
@@ -1004,7 +1010,7 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
         try:
             prop_html = fetch(url)
             psoup = BeautifulSoup(prop_html, 'html.parser')
-            details = parse_property_details(psoup, fallback=l, db_conn=db_conn)
+            details = parse_property_details(psoup, fallback=l, db_conn=db_conn, db_lock=db_lock)
             merged = {
                 'id': l.get('id') or details.get('id') or url,
                 'url': url,
@@ -1023,6 +1029,9 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
             if db_conn:
                 with db_lock:
                     saved_id = save_property(db_conn, merged)
+                    # Update blacklist tracking after saving, protected by db_lock
+                    if merged.get('agent_name') and merged.get('address'):
+                        update_agent_blacklist(db_conn, merged['agent_name'], merged['address'])
             if delay and delay > 0:
                 time.sleep(delay)
             return merged, saved_id, True
@@ -1131,7 +1140,7 @@ def parse_args():
     p = argparse.ArgumentParser(description='Simple house listings scraper (OnTheMarket only)')
     # site option left for backward compat but default/fixed to onthemarket
     p.add_argument('--site', choices=['onthemarket'], required=False, default='onthemarket')
-    p.add_argument('--location', required=False, default='worcester', help='Location slug or name e.g. Worcester')
+    p.add_argument('--location', required=False, default=None, help='Location slug or name e.g. Worcester')
     p.add_argument('--pages', type=int, default=1, help='Number of search result pages to scan')
     p.add_argument('--min-price', type=int, default=None)
     p.add_argument('--max-price', type=int, default=None)
@@ -1239,7 +1248,7 @@ if __name__ == '__main__':
         db_path=args.db,
         site=args.site,
         location=args.location,
-        pages=args.pages if args.pages > 1 else None,  # None -> auto-detect all pages
+        pages=args.pages if args.pages is not None else None,  # None -> auto-detect all pages
         min_price=args.min_price,
         max_price=args.max_price,
         min_beds=args.min_beds,

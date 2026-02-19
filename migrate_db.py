@@ -22,6 +22,7 @@ def migrate_database(db_path):
         print(f"[ERROR] Database not found at {db_path}")
         return False
     
+    conn = None
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
@@ -59,7 +60,6 @@ def migrate_database(db_path):
         else:
             print("[INFO] agent_blacklist table already exists")
         
-        conn.close()
         print("[SUCCESS] Database migration completed successfully")
         return True
         
@@ -68,6 +68,9 @@ def migrate_database(db_path):
         import traceback
         traceback.print_exc()
         return False
+    finally:
+        if conn:
+            conn.close()
 
 if __name__ == '__main__':
     db_path = sys.argv[1] if len(sys.argv) > 1 else get_db_path()

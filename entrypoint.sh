@@ -25,8 +25,9 @@ if [ ! -f "$DB_PATH" ]; then
             echo "[INFO] This may take a few minutes..."
             cd /app
             python scraper.py --non-interactive --location worcester --db "$DB_PATH" 2>&1 | grep -E '^\[|^Progress|properties' || true
+            scraper_status=${PIPESTATUS[0]}
             
-            if [ $? -eq 0 ]; then
+            if [ "${scraper_status}" -eq 0 ]; then
                 echo "[SUCCESS] Database populated with initial data"
                 SIZE=$(du -h "$DB_PATH" | cut -f1)
                 echo "[INFO] Database size after population: $SIZE"

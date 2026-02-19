@@ -284,9 +284,9 @@ The scraper automatically tracks real estate agent addresses:
 - Detects agent addresses using keyword patterns
 - Maintains a blacklist of frequently-seen agent addresses
 - When an address appears 3+ times for the same agent, it's blacklisted
-- Blacklisted addresses are automatically excluded from property listings
+- Blacklisted addresses are deprioritized in property listings and are only used as fallbacks when no non-blacklisted address is available
 
-This ensures you get accurate property addresses, not agent office locations.
+This prioritization ensures you get accurate property addresses, not agent office locations, while still returning a best-effort result when only agent addresses are present.
 
 ## Setting Up Scraper or Dashboard as a Startup Task (Legacy)
 
