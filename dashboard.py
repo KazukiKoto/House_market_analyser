@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query, HTTPException, Request, Body
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from typing import List, Optional, Dict, Any
@@ -7,7 +7,6 @@ from io import BytesIO
 from collections import Counter, defaultdict
 from statistics import median, mean
 from datetime import datetime
-from fastapi.templating import Jinja2Templates
 from contextlib import asynccontextmanager
 import os
 import sqlite3
@@ -158,9 +157,6 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
-
-# configure templates directory for web pages
-templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
 
 # Mount static files for React app
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -855,102 +851,15 @@ def get_cached_plot(key, db_path, plot_func, *args, **kwargs):
 # endpoints for graph creation
 ##################################################
 
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request, db: str = DB_DEFAULT, include_off_market: bool = True):
+@app.get("/")
+def index():
     """
-    Serve the React app if available, otherwise render the old dashboard page.
-    Args:
-        request (Request): FastAPI request object.
-        db (str): Path to the SQLite database file.
-        include_off_market (bool): If True, include off-market properties.
-    Returns:
-        HTMLResponse or FileResponse: React app or rendered dashboard page.
+    Serve the React app entrypoint.
     """
-    # Check if React build exists
     static_index = os.path.join(os.path.dirname(__file__), "static", "index.html")
     if os.path.exists(static_index):
         return FileResponse(static_index)
-    
-    # Fall back to old template
-    props = read_properties(db, include_off_market=include_off_market)
-    stats = compute_stats(props)
-
-    # Use caching for plot URIs based on DB hash
-    plot_uris = {}
-    try: plot_uris['price_dist'] = get_cached_plot('price_dist', db, fig_price_distribution, props)
-    except Exception: plot_uris['price_dist'] = None
-    try: plot_uris['beds'] = get_cached_plot('beds', db, fig_beds_distribution, props)
-    except Exception: plot_uris['beds'] = None
-    try: plot_uris['ptype'] = get_cached_plot('ptype', db, fig_property_type_share, props)
-    except Exception: plot_uris['ptype'] = None
-    try: plot_uris['sqft'] = get_cached_plot('sqft', db, fig_price_vs_sqft, props)
-    except Exception: plot_uris['sqft'] = None
-    try: plot_uris['price_per_sqft_vs_beds'] = get_cached_plot('price_per_sqft_vs_beds', db, fig_price_per_sqft_vs_beds, props)
-    except Exception: plot_uris['price_per_sqft_vs_beds'] = None
-    try: plot_uris['boxplot_price_by_type'] = get_cached_plot('boxplot_price_by_type', db, fig_boxplot_price_by_type, props)
-    except Exception: plot_uris['boxplot_price_by_type'] = None
-    try: plot_uris['boxplot_ppsqft_by_type'] = get_cached_plot('boxplot_ppsqft_by_type', db, fig_boxplot_ppsqft_by_type, props)
-    except Exception: plot_uris['boxplot_ppsqft_by_type'] = None
-    try: plot_uris['hist_sqft'] = get_cached_plot('hist_sqft', db, fig_hist_sqft, props)
-    except Exception: plot_uris['hist_sqft'] = None
-    try: plot_uris['bar_avg_price_by_beds'] = get_cached_plot('bar_avg_price_by_beds', db, fig_bar_avg_price_by_beds, props)
-    except Exception: plot_uris['bar_avg_price_by_beds'] = None
-    try: plot_uris['line_price_time'] = get_cached_plot('line_price_time', db, fig_line_price_time, props)
-    except Exception: plot_uris['line_price_time'] = None
-    try: plot_uris['boxplot_sqft_by_type'] = get_cached_plot('boxplot_sqft_by_type', db, fig_boxplot_sqft_by_type, props)
-    except Exception: plot_uris['boxplot_sqft_by_type'] = None
-    try: plot_uris['scatter_price_vs_beds'] = get_cached_plot('scatter_price_vs_beds', db, fig_scatter_price_vs_beds, props)
-    except Exception: plot_uris['scatter_price_vs_beds'] = None
-
-    # helper to format money
-    def fm(n):
-        return f"£{n:,}" if n is not None else "n/a"
-
-    # recent listings (max 20)
-    recent_listings = []
-    for p in stats["recent"][:20]:
-        imgs = p.get("images") or []
-        thumb = imgs[0] if imgs else ""
-        price = fm(p.get("price"))
-        beds = p.get("beds") or "-"
-        sqft = p.get("sqft") or "-"
-        addr = p.get("address") or p.get("title") or "No address"
-        days = ""
-        first = parse_iso_datetime(p.get("first_seen"))
-        last = parse_iso_datetime(p.get("last_seen")) or (datetime.utcnow() if p.get("on_market") == 1 else None)
-        if first:
-            end = last or datetime.utcnow()
-            try:
-                days = f"{max(0, (end - first).days)} days"
-            except Exception:
-                days = ""
-        recent_listings.append({
-            "url": p.get("url") or "#",
-            "thumb": thumb,
-            "addr": addr,
-            "price": price,
-            "beds": beds,
-            "sqft": sqft,
-            "days": days
-        })
-
-    stats_html = []
-    stats_html.append({"label": "Total listings", "value": stats['total']})
-    stats_html.append({"label": "On market", "value": stats['on_market']})
-    stats_html.append({"label": "Avg price", "value": fm(stats['avg_price'])})
-    stats_html.append({"label": "Median price", "value": fm(stats['median_price'])})
-    stats_html.append({"label": "Avg sqft", "value": stats['avg_sqft'] or 'n/a'})
-    stats_html.append({"label": "Avg beds", "value": stats['avg_beds'] or 'n/a'})
-    avg_listing_display = f"{stats['avg_listing_days']} days" if stats.get('avg_listing_days') else "n/a"
-    stats_html.append({"label": "Avg listing length", "value": avg_listing_display})
-
-    # Pass all data to the template
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "plot_uris": plot_uris,
-        "stats_html": stats_html,
-        "recent_listings": recent_listings
-    })
+    raise HTTPException(status_code=503, detail="Frontend build not found. Run frontend build to generate static/index.html")
 
 @app.get("/plots/price_trend.png")
 def price_trend(db: str = DB_DEFAULT, include_off_market: bool = True):
@@ -1038,174 +947,6 @@ def price_vs_sqft(db: str = DB_DEFAULT, include_off_market: bool = True, max_poi
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return png_response_from_fig(fig)
-
-# add endpoints for the separate pages (renders templates/houses.html and templates/assistant.html)
-@app.get("/houses", response_class=HTMLResponse)
-def houses_page(
-    request: Request,
-    db: str = DB_DEFAULT,
-    page: int = Query(1, ge=1),
-    limit: int = Query(30),
-    on_market: Optional[Any] = Query("true"),  # Default to "true" (on market)
-    min_price: Optional[Any] = Query(None),
-    max_price: Optional[Any] = Query(None),
-    min_beds: Optional[Any] = Query(None),
-    max_beds: Optional[Any] = Query(None),
-    min_sqft: Optional[Any] = Query(None),
-    max_sqft: Optional[Any] = Query(None),
-    property_type: Optional[str] = Query(None),
-    search: Optional[str] = None
-):
-    """
-    Render the houses listing page with filters and pagination.
-    Args:
-        request (Request): FastAPI request object.
-        db (str): Path to the SQLite database file.
-        page (int): Page number.
-        limit (int): Number of results per page.
-        on_market (Optional[bool]): Filter by on_market status.
-        min_price, max_price, min_beds, max_beds, min_sqft, max_sqft (Optional): Filter values.
-        property_type (Optional[str]): Filter by property type (detached, semi-detached, terraced, etc.).
-        search (Optional[str]): Search string for address/title.
-    Returns:
-        HTMLResponse: Rendered houses listing page.
-    """
-    # Accept both string and integer inputs for filters
-    def to_int(val):
-        if val in (None, "", "None"):
-            return None
-        try:
-            return int(val)
-        except Exception:
-            return None
-
-    # Print raw incoming filter values for diagnosis
-    print(f"[DIAG] Raw filter values: on_market={on_market}, min_price={min_price}, max_price={max_price}, min_beds={min_beds}, max_beds={max_beds}, min_sqft={min_sqft}, max_sqft={max_sqft}, property_type={property_type}, search={search}")
-
-    filters = []
-    params = []
-    min_price_val = to_int(min_price)
-    max_price_val = to_int(max_price)
-    min_beds_val = to_int(min_beds)
-    max_beds_val = to_int(max_beds)
-    min_sqft_val = to_int(min_sqft)
-    max_sqft_val = to_int(max_sqft)
-
-    print(f"[DIAG] Converted filter values: min_price={min_price_val}, max_price={max_price_val}, min_beds={min_beds_val}, max_beds={max_beds_val}, min_sqft={min_sqft_val}, max_sqft={max_sqft_val}")
-
-    if min_price_val is not None:
-        filters.append("price >= ?")
-        params.append(min_price_val)
-    if max_price_val is not None:
-        filters.append("price <= ?")
-        params.append(max_price_val)
-    if min_beds_val is not None:
-        filters.append("beds >= ?")
-        params.append(min_beds_val)
-    if max_beds_val is not None:
-        filters.append("beds <= ?")
-        params.append(max_beds_val)
-    if min_sqft_val is not None:
-        filters.append("sqft >= ?")
-        params.append(min_sqft_val)
-    if max_sqft_val is not None:
-        filters.append("sqft <= ?")
-        params.append(max_sqft_val)
-    # Diagnose on_market value and conversion
-    if on_market not in (None, "", "None"):
-        val = str(on_market).lower()
-        # Only apply filter if user explicitly set it
-        if val in ("true", "1", "yes", "on"):
-            filters.append("on_market = 1")
-        elif val in ("false", "0", "no", "off"):
-            filters.append("on_market = 0")
-        # Do not append a parameter for on_market, just use the value directly
-    if property_type not in (None, "", "None", "all"):
-        filters.append("property_type = ?")
-        params.append(property_type)
-    if search not in (None, "", "None"):
-        filters.append("(address LIKE ? OR title LIKE ?)")
-        params.extend([f"%{search}%", f"%{search}%"])
-
-    # Query for all matching houses (no LIMIT/OFFSET)
-    query_all = "SELECT * FROM properties"
-    if filters:
-        query_all += " WHERE " + " AND ".join(filters)
-    query_all += " ORDER BY last_seen DESC"
-
-    print(f"[DIAG] SQL Query (all): {query_all}")
-    print(f"[DIAG] SQL Params (all): {params}")
-
-    conn = get_conn(db)
-    cur = conn.cursor()
-    try:
-        cur.execute(query_all, params)
-        all_rows = cur.fetchall()
-    except Exception as e:
-        print(f"[DIAG] SQL execution error (all): {e}")
-        all_rows = []
-    conn.close()
-
-    print(f"[DIAG] Total rows matching filters: {len(all_rows)}")
-
-    # Pagination logic
-    total_props = len(all_rows)
-    total_pages = (total_props + limit - 1) // limit if total_props > 0 else 1
-
-    # Clamp page to valid range
-    if page < 1:
-        page = 1
-    if page > total_pages:
-        page = total_pages
-
-    start_idx = (page - 1) * limit
-    end_idx = start_idx + limit
-    paginated_rows = all_rows[start_idx:end_idx]
-
-    print(f"[DIAG] Paginated rows: {len(paginated_rows)} (page {page} of {total_pages})")
-
-    # Convert rows to dicts and decode images/summary as in read_properties
-    paginated_props = []
-    for r in paginated_rows:
-        d = dict(r)
-        try:
-            if d.get('images'):
-                d['images'] = json.loads(d['images'])
-        except Exception:
-            d['images'] = []
-        try:
-            if d.get('summary'):
-                d['summary'] = json.loads(d['summary'])
-        except Exception:
-            d['summary'] = {}
-        for k in ('price', 'beds', 'sqft'):
-            if k in d and d[k] is not None:
-                d[k] = int(d[k])
-        paginated_props.append(d)
-
-    print(f"[DIAG] paginated_props count: {len(paginated_props)}")
-
-    # Print a sample of the returned properties for diagnosis
-    for idx, prop in enumerate(paginated_props[:3]):
-        print(f"[DIAG] Sample property {idx+1}: {prop}")
-
-    return templates.TemplateResponse("houses.html", {
-        "request": request,
-        "houses": paginated_props,
-        "current_page": page,
-        "total_pages": total_pages
-    })
-
-@app.get("/assistant", response_class=HTMLResponse)
-def assistant_page(request: Request):
-    """
-    Render the AI assistant page (placeholder).
-    Args:
-        request (Request): FastAPI request object.
-    Returns:
-        HTMLResponse: Rendered assistant page.
-    """
-    return templates.TemplateResponse("assistant.html", {"request": request})
 
 ##################################################
 # properties API
