@@ -1,5 +1,6 @@
 import re
 import os
+import sys
 import time
 import argparse
 import tempfile
@@ -19,6 +20,114 @@ HEADERS = {
 PRICE_RE = re.compile(r'£\s?([\d,]+)')
 BEDS_RE = re.compile(r'(\d+)\s*(?:bed|beds|br|bedroom|bedrooms)\b', re.I)
 SQFT_RE = re.compile(r'([\d,]+)\s*(?:sq\s*ft|sqft|ft²|sq\.)', re.I)
+
+# Agent address detection keywords (used with whole-word matching to reduce false positives)
+AGENT_KEYWORDS = [
+    r'estate agents?', r'letting agents?',
+    r'property agents?', r'sales & letting', r'sales and letting',
+    r'branch office', r'head office',
+    r'chartered surveyors?',
+    r'\brics\b', r'\bnaea\b', r'\barla\b', r'\btpos\b', r'\bombudsman\b'
+]
+
+
+def is_agent_address(address_text):
+    """
+    Check if an address appears to be a real estate agency address
+    rather than a property address.
+    Returns True if the address contains agent-related keywords.
+    """
+    if not address_text:
+        return False
+    lower_text = address_text.lower()
+    return any(re.search(keyword, lower_text) for keyword in AGENT_KEYWORDS)
+
+
+def extract_agent_name(soup):
+    """
+    Extract the real estate agent/agency name from a property page.
+    Returns agent name as string or None if not found.
+    """
+    # Try multiple strategies to find agent name
+    # Strategy 1: Look for specific agent/office CSS selectors (avoid overly broad class-substring matches)
+    agent_selectors = [
+        '[data-test="agent-name"]', '.agent-name', '.office-name',
+        'a[href*="/agent/"]', 'a[href*="/office/"]',
+        '[data-test="branch-name"]', '.branch-name'
+    ]
+    
+    for selector in agent_selectors:
+        elem = soup.select_one(selector)
+        if elem:
+            agent_name = elem.get_text(strip=True)
+            # Must be meaningful and not suspiciously long (avoid whole paragraphs)
+            if agent_name and 3 < len(agent_name) <= 100:
+                return agent_name
+    
+    # Strategy 2: Look for text patterns like "Marketed by..."
+    page_text = soup.get_text(' ', strip=True)
+    marketed_by = re.search(r'marketed by[:\s]+([A-Za-z0-9 &\'\-\.]+?)(?:,|\n|$)', page_text, re.I)
+    if marketed_by:
+        agent_name = marketed_by.group(1).strip()
+        if agent_name and 3 < len(agent_name) <= 100:
+            return agent_name
+    
+    return None
+
+
+def update_agent_blacklist(conn, agent_name, address):
+    """
+    Update the agent blacklist with an agent name and address pair.
+    Increments occurrence count if already exists.
+    Returns True if address should be blacklisted (occurrence_count >= 3).
+    """
+    if not conn or not agent_name or not address:
+        return False
+    
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Check if this agent-address pair exists
+    cur.execute(
+        "SELECT occurrence_count FROM agent_blacklist WHERE agent_name = ? AND address = ?",
+        (agent_name, address)
+    )
+    result = cur.fetchone()
+    
+    if result:
+        # Increment count
+        new_count = result[0] + 1
+        cur.execute(
+            "UPDATE agent_blacklist SET occurrence_count = ?, last_seen = ? WHERE agent_name = ? AND address = ?",
+            (new_count, now, agent_name, address)
+        )
+        conn.commit()
+        return new_count >= 3  # Blacklist threshold
+    else:
+        # Insert new entry
+        cur.execute(
+            "INSERT INTO agent_blacklist (agent_name, address, occurrence_count, first_seen, last_seen) VALUES (?, ?, 1, ?, ?)",
+            (agent_name, address, now, now)
+        )
+        conn.commit()
+        return False
+
+
+def is_blacklisted_address(conn, address):
+    """
+    Check if an address is in the blacklist (occurrence_count >= 3).
+    Returns True if blacklisted.
+    """
+    if not conn or not address:
+        return False
+    
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM agent_blacklist WHERE address = ? AND occurrence_count >= 3",
+        (address,)
+    )
+    result = cur.fetchone()
+    return result and result[0] > 0
 
 
 def fetch(url, timeout=10):
@@ -167,14 +276,26 @@ def _extract_from_detail_links(soup, base_url):
         beds = normalize_beds(card_text)
         
         # Extract address - prefer semantic/CSS-based extraction, then fall back to heuristics
+        # Filter out agent addresses
         address = ''
-        address_el = (card.select_one('[itemprop="streetAddress"]') or
-                      card.select_one('[itemprop="address"]') or
-                      card.select_one('.address') or
-                      card.select_one('[class*="address"]'))
-        if address_el:
-            address = address_el.get_text(' ', strip=True)
+        candidate_addresses = []
+        
+        # Try semantic/CSS selectors
+        address_els = (card.select('[itemprop="streetAddress"]') +
+                       card.select('[itemprop="address"]') +
+                       card.select('.address') +
+                       card.select('[class*="address"]'))
+        
+        for addr_el in address_els:
+            addr_text = addr_el.get_text(' ', strip=True)
+            if addr_text and not is_agent_address(addr_text):
+                candidate_addresses.append(addr_text)
+        
+        if candidate_addresses:
+            # Prefer the first non-agent address
+            address = candidate_addresses[0]
         else:
+            # Fall back to heuristic search
             addr_indicators = [
                 'road', 'street', 'avenue', 'drive', 'lane', 'close',
                 'court', 'place', 'way', 'square', 'terrace', 'crescent',
@@ -186,8 +307,9 @@ def _extract_from_detail_links(soup, base_url):
                     continue
                 lower_text = text.lower()
                 if any(indicator in lower_text for indicator in addr_indicators):
-                    address = text
-                    break
+                    if not is_agent_address(text):
+                        address = text
+                        break
         
         # Extract images
         images = set()
@@ -399,12 +521,16 @@ def get_total_results_from_soup(soup):
     return None
 
 
-def parse_property_details(soup, fallback=None):
+def parse_property_details(soup, fallback=None, db_conn=None, db_lock=None):
     """
     Extract detailed fields from an OnTheMarket property page soup.
-    Returns dict: price, property_type, beds, sqft, address, title, images
+    Returns dict: price, property_type, beds, sqft, address, title, images, agent_name
     """
     out = {}
+
+    # Extract agent name first
+    agent_name = extract_agent_name(soup)
+    out['agent_name'] = agent_name
 
     # title
     title_el = soup.select_one('h1[data-test="property-title"], h1.h4, h1')
@@ -420,12 +546,45 @@ def parse_property_details(soup, fallback=None):
         m = PRICE_RE.search(t)
         out['price'] = int(m.group(1).replace(',', '')) if m else (fallback.get('price') if fallback else None)
 
-    # address
-    addr_el = soup.select_one('[itemprop="address"], .text-slate, .address, .otm-Title, [data-test="property-title"] + .text-slate')
-    if addr_el:
-        out['address'] = addr_el.get_text(' ', strip=True)
+    # address - prioritize property addresses, filter out agent addresses
+    # Keep blacklisted addresses as fallback instead of skipping them
+    candidate_addresses = []
+    blacklisted_addresses = []
+    addr_els = soup.select('[itemprop="address"], .text-slate, .address, .otm-Title, [data-test="property-title"] + .text-slate')
+    
+    for addr_el in addr_els:
+        addr_text = addr_el.get_text(' ', strip=True)
+        if addr_text and not is_agent_address(addr_text):
+            # Check if address is blacklisted (if db_conn available)
+            is_blacklisted = False
+            if db_conn:
+                # Use db_lock for thread-safe reads consistent with write operations
+                if db_lock:
+                    with db_lock:
+                        is_blacklisted = is_blacklisted_address(db_conn, addr_text)
+                else:
+                    is_blacklisted = is_blacklisted_address(db_conn, addr_text)
+            if is_blacklisted:
+                # Don't skip - keep as alternative
+                blacklisted_addresses.append(addr_text)
+            else:
+                # Prefer non-blacklisted addresses
+                candidate_addresses.append(addr_text)
+    
+    # Use best available address: non-blacklisted > blacklisted > fallback
+    if candidate_addresses:
+        # Use the first non-blacklisted address (best option)
+        out['address'] = candidate_addresses[0]
+    elif blacklisted_addresses:
+        # Use blacklisted address if no alternatives (better than nothing)
+        out['address'] = blacklisted_addresses[0]
     else:
-        out['address'] = (fallback.get('address') if fallback else '')
+        # Fall back to the fallback address if it's not an agent address
+        fallback_addr = fallback.get('address') if fallback else ''
+        if fallback_addr and not is_agent_address(fallback_addr):
+            out['address'] = fallback_addr
+        else:
+            out['address'] = ''
 
     # beds (try itemprop or phrase on page)
     beds = None
@@ -438,20 +597,29 @@ def parse_property_details(soup, fallback=None):
     out['beds'] = beds
 
     # property type - look for common type words on the page near header or in content
-    types = ['detached', 'semi-detached', 'semi detached', 'semi', 'terraced', 'terrace', 'end-terrace', 'flat', 'maisonette', 'bungalow', 'studio']
+    # IMPORTANT: Check longer compound types first to avoid false matches
+    # (e.g., check 'semi-detached' before 'detached' to avoid misclassification)
+    types = [
+        'semi-detached', 'semi detached',  # Check compound types first
+        'end-terrace', 'end terrace',
+        'detached',  # Single types after compounds
+        'terraced', 'terrace',
+        'flat', 'maisonette', 'bungalow', 'studio',
+        'semi'  # Fallback: standalone 'semi' normalizes to semi-detached
+    ]
     page_text = soup.get_text(' ', strip=True).lower()
     ptype = None
     for t in types:
         if re.search(r'\b' + re.escape(t) + r'\b', page_text):
-            # normalize some variants
-            if 'semi detached' in t or t == 'semi':
+            # normalize the matched type
+            if 'semi' in t:
                 ptype = 'semi-detached'
-            elif 'end-terrace' in t:
+            elif 'end' in t and 'terrace' in t:
                 ptype = 'end-terraced'
-            elif t == 'terrace':
+            elif t in ('terrace', 'terraced'):
                 ptype = 'terraced'
             else:
-                ptype = t if '-' in t or t == 'flat' or t == 'bungalow' or t == 'studio' else t
+                ptype = t
             break
     out['property_type'] = ptype or None
 
@@ -495,6 +663,7 @@ def init_db(db_path):
         beds INTEGER,
         sqft INTEGER,
         address TEXT,
+        agent_name TEXT,
         images TEXT,
         summary TEXT,
         first_seen TEXT,
@@ -504,8 +673,23 @@ def init_db(db_path):
         updated_at TEXT
     )
     """)
+    
+    # Create agent blacklist table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS agent_blacklist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        address TEXT NOT NULL,
+        occurrence_count INTEGER DEFAULT 1,
+        first_seen TEXT,
+        last_seen TEXT,
+        UNIQUE(agent_name, address)
+    )
+    """)
+    
     # index to speed title + address lookup
     cur.execute("CREATE INDEX IF NOT EXISTS idx_title_address ON properties(LOWER(title), LOWER(address))")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_address ON agent_blacklist(agent_name, address)")
     conn.commit()
     return conn
 
@@ -635,6 +819,7 @@ def save_property(conn, prop):
                 beds = ?,
                 sqft = ?,
                 address = ?,
+                agent_name = ?,
                 images = ?,
                 summary = ?,
                 last_seen = ?,
@@ -652,6 +837,7 @@ def save_property(conn, prop):
             prop.get('beds'),
             prop.get('sqft'),
             prop.get('address'),
+            prop.get('agent_name'),
             images_json,
             summary_json,
             now,
@@ -662,8 +848,8 @@ def save_property(conn, prop):
         # insert new record (first_seen = last_seen = now)
         cur.execute("""
             INSERT OR REPLACE INTO properties
-              (id, url, name, title, price, property_type, beds, sqft, address, images, summary, first_seen, last_seen, off_market_at, on_market, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              (id, url, name, title, price, property_type, beds, sqft, address, agent_name, images, summary, first_seen, last_seen, off_market_at, on_market, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             stored_id,
             prop.get('url'),
@@ -674,6 +860,7 @@ def save_property(conn, prop):
             prop.get('beds'),
             prop.get('sqft'),
             prop.get('address'),
+            prop.get('agent_name'),
             images_json,
             summary_json,
             now,
@@ -823,7 +1010,7 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
         try:
             prop_html = fetch(url)
             psoup = BeautifulSoup(prop_html, 'html.parser')
-            details = parse_property_details(psoup, fallback=l)
+            details = parse_property_details(psoup, fallback=l, db_conn=db_conn, db_lock=db_lock)
             merged = {
                 'id': l.get('id') or details.get('id') or url,
                 'url': url,
@@ -834,6 +1021,7 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
                 'beds': details.get('beds') if details.get('beds') is not None else l.get('beds'),
                 'sqft': details.get('sqft'),
                 'address': details.get('address') or l.get('address'),
+                'agent_name': details.get('agent_name'),
                 'images': details.get('images') or l.get('images') or [],
                 'summary': l
             }
@@ -841,6 +1029,9 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
             if db_conn:
                 with db_lock:
                     saved_id = save_property(db_conn, merged)
+                    # Update blacklist tracking after saving, protected by db_lock
+                    if merged.get('agent_name') and merged.get('address'):
+                        update_agent_blacklist(db_conn, merged['agent_name'], merged['address'])
             if delay and delay > 0:
                 time.sleep(delay)
             return merged, saved_id, True
@@ -954,37 +1145,48 @@ def parse_args():
     p.add_argument('--min-price', type=int, default=None)
     p.add_argument('--max-price', type=int, default=None)
     p.add_argument('--min-beds', type=int, default=None)
-    p.add_argument('--db', required=False, default='d:\\Projects\\House_market_analyser\\properties.db',
-                   help='Path to sqlite database file')
+    p.add_argument('--db', required=False, default='properties.db',
+                   help='Path to sqlite database file (default: properties.db in current directory)')
+    p.add_argument('--non-interactive', action='store_true', 
+                   help='Run without prompts (use defaults)')
     args = p.parse_args()
 
+    # Only prompt interactively if stdin is a terminal and not in non-interactive mode
+    is_interactive = sys.stdin.isatty() and not args.non_interactive
+    
     # Interactive prompts for values not supplied on the CLI
-    try:
-        if not args.location:
-            loc = input("Location (e.g. Worcester) [required]: ").strip()
-            args.location = loc or None
+    if is_interactive:
+        try:
+            if not args.location:
+                loc = input("Location (e.g. Worcester) [required]: ").strip()
+                args.location = loc or None
 
-        # if still missing required, show help and exit cleanly
-        if not args.location:
-            p.print_help()
+            # if still missing required, show help and exit cleanly
+            if not args.location:
+                p.print_help()
+                raise SystemExit(0)
+
+            # optional numeric prompts (press Enter to keep current/None)
+            args.pages = _prompt_int(f"Pages [{args.pages}]: ", default=args.pages)
+            args.min_price = _prompt_int(f"Min price [{args.min_price if args.min_price is not None else 'none'}]: ", default=args.min_price)
+            args.max_price = _prompt_int(f"Max price [{args.max_price if args.max_price is not None else 'none'}]: ", default=args.max_price)
+            args.min_beds = _prompt_int(f"Min beds [{args.min_beds if args.min_beds is not None else 'none'}]: ", default=args.min_beds)
+
+        except (EOFError, KeyboardInterrupt):
+            # if input is interrupted, exit gracefully
+            print("\nInput cancelled.")
             raise SystemExit(0)
-
-        # optional numeric prompts (press Enter to keep current/None)
-        args.pages = _prompt_int(f"Pages [{args.pages}]: ", default=args.pages)
-        args.min_price = _prompt_int(f"Min price [{args.min_price if args.min_price is not None else 'none'}]: ", default=args.min_price)
-        args.max_price = _prompt_int(f"Max price [{args.max_price if args.max_price is not None else 'none'}]: ", default=args.max_price)
-        args.min_beds = _prompt_int(f"Min beds [{args.min_beds if args.min_beds is not None else 'none'}]: ", default=args.min_beds)
-
-    except (EOFError, KeyboardInterrupt):
-        # if input is interrupted, exit gracefully
-        print("\nInput cancelled.")
-        raise SystemExit(0)
+    else:
+        # Non-interactive mode: use defaults if location not provided
+        if not args.location:
+            args.location = 'worcester'
+            print(f"[INFO] Using default location: {args.location}", flush=True)
 
     return args
 
 
 def run_scrape(
-    db_path='d:\\Projects\\House_market_analyser\\properties.db',
+    db_path='properties.db',
     site='onthemarket',
     location='worcester',
     pages=None,
@@ -1038,15 +1240,18 @@ def run_scrape(
 
 
 if __name__ == '__main__':
-    # Non-interactive default run: Worcester, all pages (auto), no price/beds filters.
+    # Parse command-line arguments
+    args = parse_args()
+    
+    # Run scraper with provided arguments
     results = run_scrape(
-        db_path='d:\\Projects\\House_market_analyser\\properties.db',
-        site='onthemarket',
-        location='worcester',
-        pages=None,         # None -> auto-detect all pages
-        min_price=None,
-        max_price=None,
-        min_beds=None,
+        db_path=args.db,
+        site=args.site,
+        location=args.location,
+        pages=args.pages if args.pages is not None else None,  # None -> auto-detect all pages
+        min_price=args.min_price,
+        max_price=args.max_price,
+        min_beds=args.min_beds,
         delay=1.0,
         max_workers=7
     )

@@ -4,6 +4,9 @@ __pycache__/
 
 # Database and cache files
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 dashboard_plot_cache.pkl
 dashboard_plot_cache_hash.txt
 

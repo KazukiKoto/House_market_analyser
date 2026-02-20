@@ -35,6 +35,7 @@ try:
         beds INTEGER,
         sqft INTEGER,
         address TEXT,
+        agent_name TEXT,
         images TEXT,
         summary TEXT,
         first_seen TEXT,
@@ -45,8 +46,22 @@ try:
     )
     """)
     
+    # Create agent blacklist table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS agent_blacklist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        address TEXT NOT NULL,
+        occurrence_count INTEGER DEFAULT 1,
+        first_seen TEXT,
+        last_seen TEXT,
+        UNIQUE(agent_name, address)
+    )
+    """)
+    
     # Create index
     cur.execute("CREATE INDEX IF NOT EXISTS idx_title_address ON properties(LOWER(title), LOWER(address))")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_address ON agent_blacklist(agent_name, address)")
     
     conn.commit()
     conn.close()
