@@ -101,7 +101,6 @@ def update_agent_blacklist(conn, agent_name, address):
             "UPDATE agent_blacklist SET occurrence_count = ?, last_seen = ? WHERE agent_name = ? AND address = ?",
             (new_count, now, agent_name, address)
         )
-        conn.commit()
         return new_count >= 3  # Blacklist threshold
     else:
         # Insert new entry
@@ -109,7 +108,6 @@ def update_agent_blacklist(conn, agent_name, address):
             "INSERT INTO agent_blacklist (agent_name, address, occurrence_count, first_seen, last_seen) VALUES (?, ?, 1, ?, ?)",
             (agent_name, address, now, now)
         )
-        conn.commit()
         return False
 
 
@@ -652,6 +650,9 @@ def init_db(db_path):
     # allow cross-thread use of the connection; we will serialize writes with a lock
     conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
     cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.execute("PRAGMA busy_timeout=30000")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS properties (
         id TEXT PRIMARY KEY,
@@ -698,6 +699,23 @@ def _norm_text(s):
     if not s:
         return ''
     return re.sub(r'\s+', ' ', s.strip().lower())
+
+
+def _run_with_db_retry(operation, max_retries=8, base_delay=0.1):
+    """
+    Retry SQLite operations that fail with transient lock errors.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return operation()
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if 'locked' not in msg and 'busy' not in msg:
+                raise
+            if attempt >= max_retries:
+                raise
+            sleep_s = min(2.0, base_delay * (2 ** attempt))
+            time.sleep(sleep_s)
 
 
 def _find_existing(conn, prop):
@@ -869,7 +887,6 @@ def save_property(conn, prop):
             1,
             now
         ))
-    conn.commit()
     return stored_id
 
 
@@ -889,7 +906,6 @@ def mark_off_market(conn, seen_ids):
         sql = "UPDATE properties SET on_market=0, off_market_at=?, updated_at=? WHERE on_market=1"
         params = [now, now]
     cur.execute(sql, params)
-    conn.commit()
 
 
 def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=None, delay=1.0, db_conn=None, db_lock=None, max_workers=5):
@@ -1028,10 +1044,14 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
             saved_id = None
             if db_conn:
                 with db_lock:
-                    saved_id = save_property(db_conn, merged)
-                    # Update blacklist tracking after saving, protected by db_lock
-                    if merged.get('agent_name') and merged.get('address'):
-                        update_agent_blacklist(db_conn, merged['agent_name'], merged['address'])
+                    def _write_listing():
+                        with db_conn:
+                            sid = save_property(db_conn, merged)
+                            # Update blacklist tracking after saving, protected by db_lock
+                            if merged.get('agent_name') and merged.get('address'):
+                                update_agent_blacklist(db_conn, merged['agent_name'], merged['address'])
+                            return sid
+                    saved_id = _run_with_db_retry(_write_listing)
             if delay and delay > 0:
                 time.sleep(delay)
             return merged, saved_id, True
@@ -1052,7 +1072,10 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
             saved_id = None
             if db_conn:
                 with db_lock:
-                    saved_id = save_property(db_conn, merged)
+                    def _write_fallback():
+                        with db_conn:
+                            return save_property(db_conn, merged)
+                    saved_id = _run_with_db_retry(_write_fallback)
             if delay and delay > 0:
                 time.sleep(delay)
             return merged, saved_id, False
@@ -1096,7 +1119,11 @@ def scrape(site, location, pages=1, min_price=None, max_price=None, min_beds=Non
     # After processing all properties, mark any previously on-market DB entries not seen this run as off-market
     if db_conn:
         try:
-            mark_off_market(db_conn, seen_ids)
+            with db_lock:
+                def _mark_off_market():
+                    with db_conn:
+                        mark_off_market(db_conn, seen_ids)
+                _run_with_db_retry(_mark_off_market)
             print(f'[Database] Updated on-market status for properties', flush=True)
         except Exception as e:
             print(f'[Database] ERROR marking off-market properties: {e}', flush=True)

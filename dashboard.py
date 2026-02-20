@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Scheduler instance
 scheduler = None
+scrape_run_lock = threading.Lock()
 
 ##################################################
 # scraping automation
@@ -59,6 +60,10 @@ def run_scheduled_scrape():
         logger.warning("Scraper not available - skipping scheduled scrape")
         return
     
+    if not scrape_run_lock.acquire(blocking=False):
+        logger.info("Scheduled scrape skipped because another scrape is still running")
+        return
+
     logger.info("Starting scheduled property scrape...")
     try:
         # Get database path (use environment variable or default)
@@ -102,6 +107,8 @@ def run_scheduled_scrape():
         logger.info(f"Scraping completed successfully. Found {len(results)} properties.")
     except Exception as e:
         logger.error(f"Error during scheduled scrape: {e}", exc_info=True)
+    finally:
+        scrape_run_lock.release()
 
 
 @asynccontextmanager
@@ -126,7 +133,9 @@ async def lifespan(app: FastAPI):
         'interval',
         hours=1,
         id='scrape_properties',
-        replace_existing=True
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
     )
     scheduler.start()
     logger.info("Scheduler started - will scrape properties every hour")
@@ -176,7 +185,9 @@ def get_conn(db_path: str = DB_DEFAULT):
         db_path = os.path.join(os.path.dirname(__file__), db_path)
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"DB not found: {db_path}")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA query_only=ON")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -1042,6 +1053,7 @@ def houses_page(
     max_beds: Optional[Any] = Query(None),
     min_sqft: Optional[Any] = Query(None),
     max_sqft: Optional[Any] = Query(None),
+    property_type: Optional[str] = Query(None),
     search: Optional[str] = None
 ):
     """
@@ -1053,6 +1065,7 @@ def houses_page(
         limit (int): Number of results per page.
         on_market (Optional[bool]): Filter by on_market status.
         min_price, max_price, min_beds, max_beds, min_sqft, max_sqft (Optional): Filter values.
+        property_type (Optional[str]): Filter by property type (detached, semi-detached, terraced, etc.).
         search (Optional[str]): Search string for address/title.
     Returns:
         HTMLResponse: Rendered houses listing page.
@@ -1067,7 +1080,7 @@ def houses_page(
             return None
 
     # Print raw incoming filter values for diagnosis
-    print(f"[DIAG] Raw filter values: on_market={on_market}, min_price={min_price}, max_price={max_price}, min_beds={min_beds}, max_beds={max_beds}, min_sqft={min_sqft}, max_sqft={max_sqft}, search={search}")
+    print(f"[DIAG] Raw filter values: on_market={on_market}, min_price={min_price}, max_price={max_price}, min_beds={min_beds}, max_beds={max_beds}, min_sqft={min_sqft}, max_sqft={max_sqft}, property_type={property_type}, search={search}")
 
     filters = []
     params = []
@@ -1107,6 +1120,9 @@ def houses_page(
         elif val in ("false", "0", "no", "off"):
             filters.append("on_market = 0")
         # Do not append a parameter for on_market, just use the value directly
+    if property_type not in (None, "", "None", "all"):
+        filters.append("property_type = ?")
+        params.append(property_type)
     if search not in (None, "", "None"):
         filters.append("(address LIKE ? OR title LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])

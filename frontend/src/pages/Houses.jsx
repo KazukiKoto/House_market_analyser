@@ -13,6 +13,7 @@ function Houses() {
     max_beds: '',
     min_sqft: '',
     max_sqft: '',
+    property_type: '',
     search: ''
   })
   const [currentPage, setCurrentPage] = useState(1)
@@ -52,6 +53,7 @@ function Houses() {
     if (filters.max_beds && house.beds > parseInt(filters.max_beds)) return false
     if (filters.min_sqft && house.sqft < parseInt(filters.min_sqft)) return false
     if (filters.max_sqft && house.sqft > parseInt(filters.max_sqft)) return false
+    if (filters.property_type && filters.property_type !== '' && house.property_type !== filters.property_type) return false
     if (filters.search && !(house.address?.toLowerCase().includes(filters.search.toLowerCase()) || house.title?.toLowerCase().includes(filters.search.toLowerCase()))) return false
     return true
   })
@@ -154,6 +156,26 @@ function Houses() {
                 placeholder="Max sqft"
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
               />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Property Type
+              </label>
+              <select
+                value={filters.property_type}
+                onChange={(e) => setFilters({...filters, property_type: e.target.value})}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+              >
+                <option value="">All Types</option>
+                <option value="detached">Detached</option>
+                <option value="semi-detached">Semi-Detached</option>
+                <option value="terraced">Terraced</option>
+                <option value="end-terraced">End-Terraced</option>
+                <option value="flat">Flat</option>
+                <option value="bungalow">Bungalow</option>
+                <option value="maisonette">Maisonette</option>
+                <option value="studio">Studio</option>
+              </select>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">

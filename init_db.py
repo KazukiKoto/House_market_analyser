@@ -22,6 +22,9 @@ try:
     
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.execute("PRAGMA busy_timeout=30000")
     
     # Create the properties table
     cur.execute("""

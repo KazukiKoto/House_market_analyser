@@ -52,6 +52,9 @@ COPY migrate_db.py .
 COPY entrypoint.sh .
 COPY templates/ templates/
 
+# Normalize shell script line endings (important on Windows checkouts)
+RUN sed -i 's/\r$//' /app/entrypoint.sh
+
 # Make entrypoint executable
 RUN chmod +x /app/entrypoint.sh
 
